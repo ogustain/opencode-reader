@@ -1,0 +1,52 @@
+{
+  "name": "opencode-reader",
+  "version": "0.1.0",
+  "description": "Read EPUBs in an OpenCode session panel, with reading positions synced to a BOOX e-reader (NeoReader) through the Onyx cloud",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogustain/opencode-reader.git"
+  },
+  "homepage": "https://github.com/ogustain/opencode-reader#readme",
+  "bugs": "https://github.com/ogustain/opencode-reader/issues",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "epub",
+    "boox",
+    "onyx",
+    "reader"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "!src/**/*.test.ts",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.28"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.6.5",
+    "@opentui/solid": ">=0.6.5",
+    "solid-js": ">=1.9.12"
+  },
+  "devDependencies": {
+    "@opentui/core": "0.6.5",
+    "@opentui/solid": "0.6.5",
+    "@types/node": "26.6.5",
+    "solid-js": "1.9.12",
+    "typescript": "5.9.3"
+  }
+}
