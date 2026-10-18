@@ -32,8 +32,8 @@ import {
   type PushResult,
 } from "./rpc.ts"
 import {
-  cloudLibrary, cloudReading, decidePush, parseProgress, patchBookDoc, toLocal, toNeo, withPushedProgress, type CloudLibrary, type NeoRef,
-  type OwnPush,
+  cloudLibrary, cloudReading, decidePush, docTotal, parseProgress, patchBookDoc, progressFor, toLocal, toNeo, withPushedProgress,
+  type CloudLibrary, type NeoRef, type OwnPush,
 } from "./sync.ts"
 
 const BOOX_MIN_INTERVAL_MS = 60_000
@@ -300,6 +300,7 @@ export default Plugin.define({
             const doc = await onyx.getDoc(book.id)
             const reading = cloudReading(doc)
             const cloudLocal = reading.point ? toLocal(reading.point, bookRefs, (s) => mapOf(path, s)) : undefined
+            const total = docTotal(doc)
             const decision = decidePush({
               turnedAt: turnedAt as number,
               cloudTime: reading.updateTime,
@@ -307,6 +308,7 @@ export default Plugin.define({
               ...(knownPush ? { own: knownPush } : {}),
               local,
               ...(cloudLocal ? { cloud: { spine: cloudLocal.spine, offset: cloudLocal.offset } } : {}),
+              ...(total ? { progress: { local: progressFor(percent as number, total, finished === true), cloud: doc.progress } } : {}),
             })
             if (!decision.push) return { ok: true, pushed: false, reason: decision.reason }
             const fields = toNeo(local, bookRefs, mapOf(path, local.spine))

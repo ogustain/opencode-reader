@@ -152,6 +152,22 @@ test("push only a new position read here after the Boox last saved", () => {
   assert.deepEqual(decidePush({ turnedAt: 6, cloudTime: 5, local }), { push: true })
 })
 
+test("the same position with a new progress or finished state is pushed, not acknowledged as sent", () => {
+  const end = { spine: 9, offset: 4000 }
+  const at = (local: string, cloud: unknown) => decidePush({ turnedAt: 6, cloudTime: 5, local: end, cloud: end, progress: { local, cloud } })
+  // Back, then forward again onto the last screen the cloud already holds unfinished: finish it.
+  assert.deepEqual(at("129/129", "128/129"), { push: true })
+  // Finished in the cloud, unfinished here at the same screen: unfinish it.
+  assert.deepEqual(at("128/129", "129/129"), { push: true })
+  assert.deepEqual(at("127/129", "128/129"), { push: true })
+  assert.deepEqual(at("128/129", undefined), { push: true })
+  // Nothing new: skipped (the TUI acknowledges it).
+  assert.deepEqual(at("129/129", "129/129"), { push: false, reason: "same position" })
+  assert.deepEqual(at("128/129", " 128 / 129 "), { push: false, reason: "same position" })
+  // A new position is pushed whatever the progress.
+  assert.deepEqual(decidePush({ turnedAt: 6, cloudTime: 5, local: end, cloud: { spine: 9, offset: 0 }, progress: { local: "128/129", cloud: "128/129" } }), { push: true })
+})
+
 test("pull a newer Boox position, not our own push", () => {
   const cloud = { spine: 4, offset: 0 }
   const local = { spine: 2, offset: 100 }

@@ -80,6 +80,11 @@ export function withPushedProgress(books: readonly CloudBook[], id: string, prog
   return books.map((b) => (b.id === id ? { ...b, current: p.current, total: p.total, percent: (p.current / p.total) * 100, finished: p.current >= p.total } : b))
 }
 
+/** A book doc's page count: NeoReader's `total_page`, else the `progress` total. */
+export function docTotal(doc: Doc): number | undefined {
+  return num(backendOf(doc)?.total_page) || parseProgress(doc.progress)?.total
+}
+
 /** EPUB books, collections and memberships of the library channel. */
 export function cloudLibrary(docs: readonly Doc[]): CloudLibrary {
   const memberOf = new Map<string, Set<string>>()
@@ -237,16 +242,35 @@ export type PushDecision = { push: true } | { push: false; reason: "no local rea
 
 /**
  * Push only a position the user reached by turning pages after the last
- * device save, and only a new one. When the cloud holds our own push, its
- * update time is the server's clock at that push: compare with the page-turn
- * time that push carried instead.
+ * device save, and only a new one: a new position, or the same one with a
+ * new `progress` (the push would write `progress.local`, the cloud holds
+ * `progress.cloud`), so finishing or unfinishing on the same screen goes
+ * through. When the cloud holds our own push, its update time is the
+ * server's clock at that push: compare with the page-turn time that push
+ * carried instead.
  */
-export function decidePush(input: { turnedAt?: number; cloudTime: number; deviceModel?: string; own?: OwnPush; local: Local; cloud?: Local }): PushDecision {
+export function decidePush(input: {
+  turnedAt?: number
+  cloudTime: number
+  deviceModel?: string
+  own?: OwnPush
+  local: Local
+  cloud?: Local
+  progress?: { local: string; cloud: unknown }
+}): PushDecision {
   if (!input.turnedAt) return { push: false, reason: "no local reading" }
   const since = isOwnWrite({ updateTime: input.cloudTime, deviceModel: input.deviceModel }, input.own) ? input.own!.turnedAt : input.cloudTime
   if (input.turnedAt <= since) return { push: false, reason: "the Boox is newer" }
-  if (same(input.local, input.cloud)) return { push: false, reason: "same position" }
+  if (same(input.local, input.cloud) && (!input.progress || sameProgress(input.progress.local, input.progress.cloud)))
+    return { push: false, reason: "same position" }
   return { push: true }
+}
+
+/** Same page count, current page and so finished state (total/total). */
+function sameProgress(a: unknown, b: unknown): boolean {
+  const pa = parseProgress(a)
+  const pb = parseProgress(b)
+  return !!pa && !!pb && pa.current === pb.current && pa.total === pb.total && (pa.current >= pa.total) === (pb.current >= pb.total)
 }
 
 /**
@@ -410,7 +434,7 @@ export function patchBookDoc(
   if (doc.modeType !== 4 || typeof doc._rev !== "string" || typeof doc.extraAttributes !== "string") return undefined
   const backend = backendOf(doc)
   if (!backend) return undefined
-  const total = num(backend.total_page) || parseProgress(doc.progress)?.total
+  const total = docTotal(doc)
   if (!total || total <= 0) return undefined
   const base: NeoPosition | undefined = POSITION_KEYS.map((key) => parseNeoPosition(backend[key])).find((p) => neoPoint(p))
   const positions = Object.fromEntries(
