@@ -70,7 +70,7 @@ server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
   device (collection → sub-collection → book, plus "Not in a collection"),
   EPUB only, each book with its percentage and last read date. Finished books
   are hidden behind "Show finished books". `Esc` goes up one level.
-  - Each book says where its file is: "on this Mac" (already fetched), "in
+  - Each book says where its file is: "on this computer" (already fetched), "in
     the cloud" (the BOOX was asked to upload it) or "Boox only".
   - Choosing a book opens the local copy; without one it downloads the file
     from the Onyx cloud, else copies it over ADB. With neither, it tells you

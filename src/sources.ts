@@ -1,5 +1,5 @@
 /**
- * Where a book file not yet on this Mac comes from: the copy the Boox
+ * Where a book file not yet on this computer comes from: the copy the Boox
  * uploaded to the Onyx cloud first (no cable), then ADB.
  */
 import { randomBytes } from "node:crypto"
@@ -8,7 +8,7 @@ import { dirname } from "node:path"
 import { AdbError } from "./adb.ts"
 import { EXPIRED_MESSAGE, OnyxError, publishFile } from "./onyx.ts"
 
-export const NOT_HERE = "Not on this Mac: on the Boox, long-press the book → Upload source file (or plug the Boox in)"
+export const NOT_HERE = "Not on this computer: on the Boox, long-press the book → Upload source file (or plug the Boox in)"
 
 /** `expired`: the cloud refused the token (whatever ADB did). */
 export type Obtained = { ok: true; source: "cloud" | "adb"; expired?: true } | { ok: false; error: string; notHere?: true; expired?: true }

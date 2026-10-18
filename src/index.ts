@@ -7,7 +7,7 @@
  * at a time, reads the NeoReader library over ADB (read-only, at most once a
  * minute, used to copy files), and syncs reading positions with the Onyx cloud
  * (library at most once a minute; one book doc GET per pull, GET + PUT per push).
- * A book file not on this Mac is downloaded from the Onyx cloud storage when
+ * A book file not on this computer is downloaded from the Onyx cloud storage when
  * the Boox uploaded it, else copied over ADB.
  *
  * Options: `dir` (local books), `dataDir` (cache, token, session, backups;

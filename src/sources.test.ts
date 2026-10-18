@@ -24,6 +24,7 @@ test("the cloud copy comes first, ADB next, and a missing or unreachable cloud f
 })
 
 test("with no source left: the upload hint, the expired-token message, or the ADB failure", async () => {
+  assert.match(NOT_HERE, /^Not on this computer: /)
   assert.deepEqual(await obtainBook({ cloud: fail(new OnyxError("missing", "x")), adb: fail(noBoox) }), { ok: false, error: NOT_HERE, notHere: true })
   assert.deepEqual(await obtainBook({ adb: fail(new AdbError("offline", "offline")) }), { ok: false, error: NOT_HERE, notHere: true })
   assert.deepEqual(await obtainBook({ cloud: fail(new OnyxError("expired", EXPIRED_MESSAGE)), adb: fail(noBoox) }), { ok: false, error: EXPIRED_MESSAGE, expired: true })

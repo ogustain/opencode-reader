@@ -453,7 +453,7 @@ export default Plugin.define({
       openPanel()
     }
 
-    /** The book's file on this Mac: cached, else downloaded from the Onyx cloud, else copied over ADB. */
+    /** The book's file on this computer: cached, else downloaded from the Onyx cloud, else copied over ADB. */
     const fetchBook = async (choice: { title: string; path: string; size: number; cached?: string }, quiet = false, cloud = true) => {
       if (!choice.cached && !quiet) toast((await settings())?.cloud ? `Downloading ${choice.title} from the Onyx cloud…` : `Copying ${choice.title} from the Boox…`)
       return (await reader.fetch({ booxPath: choice.path, size: choice.size, ...(cloud ? {} : { cloud: false }) }).catch((e) => ({ ok: false, error: failure(e) }))) as FetchResult
@@ -469,12 +469,12 @@ export default Plugin.define({
       if (await loadBook(fetched.book)) openPanel()
     }
 
-    /** Where a book's file is: on this Mac, uploaded to the cloud (the Boox's hint), or only on the Boox. */
-    const fileMarker = (b: CloudEntry) => (b.cached ? "on this Mac" : b.uploaded ? "in the cloud" : "Boox only")
+    /** Where a book's file is: on this computer, uploaded to the cloud (the Boox's hint), or only on the Boox. */
+    const fileMarker = (b: CloudEntry) => (b.cached ? "on this computer" : b.uploaded ? "in the cloud" : "Boox only")
 
     const downloadUnfinished = async (books: CloudEntry[]) => {
       const todo = books.filter((b) => !b.finished && !b.cached)
-      if (todo.length === 0) return toast("Every unfinished book is already on this Mac.")
+      if (todo.length === 0) return toast("Every unfinished book is already on this computer.")
       toast(`Downloading ${todo.length} books (Onyx cloud, then the Boox)…`)
       // After a token refusal the rest go over ADB only, and the expiry is said once, with the summary.
       const { downloaded, onBoox, failed, expired } = await downloadBatch(todo, (b, cloud) => fetchBook(b, true, cloud))
