@@ -171,19 +171,47 @@ export function nextChapter(chapters: readonly number[], spine: number, dir: 1 |
 }
 
 /**
- * On the book's last screen: no next screen in this chapter (its wrapped
- * `lines`) and no later chapter with text.
+ * On the last screen of a book with text: this chapter has text (its wrapped
+ * `lines`), no next screen in it and no later chapter with text.
  */
 export function atBookEnd(chapters: readonly number[], spine: number, lines: readonly Line[], height: number, offset: number): boolean {
-  return nextScreen(lines, height, offset) === undefined && nextChapter(chapters, spine, 1) === undefined
+  return lines.length > 0 && nextScreen(lines, height, offset) === undefined && nextChapter(chapters, spine, 1) === undefined
 }
 
 /**
- * Progress shown and sent: 100 % on the last screen (the position is its
- * start, short of the end), else the position's percentage.
+ * A forward page turn from `from`, on its chapter's wrapped `lines`: the next
+ * screen, else the first one of the next chapter with text (`wrapChapter`
+ * lays it out), else `from` itself (`end`). It finishes the book when it lands
+ * on the last screen of a book with text, or presses on from it: the only way
+ * a book becomes finished (opening, resizing or restoring never do).
  */
-export function progressOf(chapters: readonly number[], position: Position, atEnd: boolean): number {
-  return atEnd ? 100 : toPercent(chapters, position)
+export async function turnForward(
+  chapters: readonly number[],
+  from: Position,
+  lines: readonly Line[],
+  height: number,
+  wrapChapter: (spine: number) => Promise<readonly Line[] | undefined>,
+): Promise<{ to: Position; end: boolean; finished: boolean }> {
+  const offset = nextScreen(lines, height, from.offset)
+  if (offset !== undefined) return { to: { spine: from.spine, offset }, end: false, finished: atBookEnd(chapters, from.spine, lines, height, offset) }
+  const next = nextChapter(chapters, from.spine, 1)
+  if (next === undefined) return { to: from, end: true, finished: atBookEnd(chapters, from.spine, lines, height, from.offset) }
+  const nextLines = await wrapChapter(next)
+  return { to: { spine: next, offset: 0 }, end: false, finished: !!nextLines && atBookEnd(chapters, next, nextLines, height, 0) }
+}
+
+/** Reopening at the position of a finish saved by a page turn keeps it; nothing else does. */
+export function savedFinish(saved: { spine: number; offset: number; finished?: boolean } | undefined, position: Position): boolean {
+  return saved?.finished === true && saved.spine === position.spine && saved.offset === position.offset
+}
+
+/**
+ * Progress shown and sent: 100 % only for a finished book (its position is
+ * the start of the last screen, short of the end), else the position's
+ * percentage, at most 99.
+ */
+export function progressOf(chapters: readonly number[], position: Position, finished: boolean): number {
+  return finished ? 100 : Math.min(99, toPercent(chapters, position))
 }
 
 /** Table of contents: chapters with text, titled from the TOC or "Chapter N", with the % at their start. */

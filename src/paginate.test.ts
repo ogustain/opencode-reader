@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   atBookEnd, booxHint, chooseStart, column, contents, fromPercent, isFinished, justify, lastScreen, layout, lineAt, nextChapter, nextScreen, previousScreen,
-  progressOf, savedTimes, screenAt, toPercent,
+  progressOf, savedFinish, savedTimes, screenAt, toPercent, turnForward,
 } from "./paginate.ts"
 import { chapterLength, type Paragraph } from "./text.ts"
 import type { Display, Line } from "./paginate.ts"
@@ -80,23 +80,61 @@ test("turning pages walks the whole chapter, both ways", () => {
   assert.equal(previousScreen([], 10, 0), undefined)
 })
 
-test("the book's last screen counts as 100 %, and turning back goes below", () => {
+const noChapter = async () => undefined
+
+test("a forward turn onto the book's last screen finishes it, and turning back unfinishes it", async () => {
   const lines = layout(paragraphs, 12)
   const height = 3
   const length = chapterLength(paragraphs)
   const chapters = [500, length, 0] // The last chapter has no text.
-  let last = 0
-  for (let next = nextScreen(lines, height, 0); next !== undefined; next = nextScreen(lines, height, next)) last = next
-  const end = { spine: 1, offset: last }
+  const turns: Array<{ to: { spine: number; offset: number }; finished: boolean }> = []
+  for (let from = { spine: 1, offset: 0 }; ; ) {
+    const turn = await turnForward(chapters, from, lines, height, noChapter)
+    if (turn.end) break
+    turns.push(turn)
+    from = turn.to
+  }
+  assert.ok(turns.length > 1)
+  assert.deepEqual(turns.map((t) => t.finished), turns.map((_, i) => i === turns.length - 1))
+  const end = turns.at(-1)!.to
   assert.ok(toPercent(chapters, end) < 100) // The position is the start of the screen.
-  assert.equal(atBookEnd(chapters, 1, lines, height, last), true)
   assert.equal(progressOf(chapters, end, true), 100)
-  const back = previousScreen(lines, height, last)!
-  assert.equal(atBookEnd(chapters, 1, lines, height, back), false)
-  assert.ok(progressOf(chapters, { spine: 1, offset: back }, false) < 100)
-  // The same screen in an earlier chapter is not the end; a taller screen is.
-  assert.equal(atBookEnd([length, 500], 0, lines, height, last), false)
-  assert.equal(atBookEnd(chapters, 1, lines, lines.length, 0), true)
+  const back = previousScreen(lines, height, end.offset)!
+  assert.ok(progressOf(chapters, { spine: 1, offset: back }, false) <= 99)
+  // Onto a next chapter that fits on one screen: finished on landing.
+  const short = layout([{ text: "The end." }], 12)
+  const across = await turnForward([length, 8], { spine: 0, offset: end.offset }, lines, height, async () => short)
+  assert.deepEqual(across, { to: { spine: 1, offset: 0 }, end: false, finished: true })
+  // The same screen in an earlier chapter is not the end.
+  assert.equal(atBookEnd([length, 500], 0, lines, height, end.offset), false)
+})
+
+test("opening, resizing or restoring never finish a book", async () => {
+  const lines = layout(paragraphs, 12)
+  const length = chapterLength(paragraphs)
+  const chapters = [length]
+  const end = { spine: 0, offset: lastScreen(lines, 3) }
+  // Opened at the end: shown below 100 %, unless a page turn finished it there before.
+  assert.equal(savedFinish(undefined, end), false)
+  assert.equal(savedFinish({ ...end, finished: false }, end), false)
+  assert.equal(savedFinish({ ...end }, end), false)
+  assert.equal(savedFinish({ ...end, finished: true }, { spine: 0, offset: 0 }), false)
+  assert.equal(savedFinish({ ...end, finished: true }, end), true)
+  assert.ok(progressOf(chapters, end, false) <= 99)
+  assert.equal(progressOf([10], { spine: 0, offset: 10 }, false), 99) // Even at the very end of the text.
+  // Resized: a taller screen makes the first one the last, still shown below 100 %;
+  // pressing on from there finishes the book.
+  assert.equal(atBookEnd(chapters, 0, lines, lines.length, 0), true)
+  assert.equal(progressOf(chapters, { spine: 0, offset: 0 }, false), 0)
+  assert.deepEqual(await turnForward(chapters, { spine: 0, offset: 0 }, lines, lines.length, noChapter), { to: { spine: 0, offset: 0 }, end: true, finished: true })
+  // A single-screen book: 0 % when opened, finished by a forward turn.
+  const one = layout([{ text: "Short." }], 12)
+  assert.equal(progressOf([7], { spine: 0, offset: 0 }, false), 0)
+  assert.deepEqual(await turnForward([7], { spine: 0, offset: 0 }, one, 3, noChapter), { to: { spine: 0, offset: 0 }, end: true, finished: true })
+  // An empty book: 0 %, and never finished.
+  assert.equal(progressOf([0, 0], { spine: 0, offset: 0 }, false), 0)
+  assert.equal(atBookEnd([0, 0], 0, [], 3, 0), false)
+  assert.deepEqual(await turnForward([0, 0], { spine: 0, offset: 0 }, [], 3, noChapter), { to: { spine: 0, offset: 0 }, end: true, finished: false })
 })
 
 test("position and percentage round trip", () => {

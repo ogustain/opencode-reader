@@ -14,11 +14,11 @@
  * when a push fails, the panel and the sidebar show "Boox: go to N %".
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
-import { createEffect, createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
+import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
 import type { OnyxState } from "./onyx"
 import {
-  atBookEnd, booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, lastScreen, layout, nextChapter, nextScreen,
-  previousScreen, progressOf, savedTimes, screenAt, type Display, type Position,
+  booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, lastScreen, layout, nextChapter, previousScreen, progressOf,
+  savedFinish, savedTimes, screenAt, turnForward, type Display, type Position,
 } from "./paginate"
 import {
   ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type OpenResult,
@@ -53,6 +53,8 @@ type Saved = {
   openedAt?: number
   /** Path on the Boox, for books copied from it (the ones that sync). */
   booxPath?: string
+  /** Read to the end at this position, by a forward page turn. */
+  finished?: boolean
   boox?: { percent: number; lastAccess: number; checkedAt: number }
   /**
    * Last push: "sent" or "failed". `turnedAt`: page-turn time of the last
@@ -62,7 +64,7 @@ type Saved = {
 }
 type Book = { key: string; path: string; title: string; author?: string; booxPath?: string; chapters: number[]; titles: Array<string | undefined> }
 type CloudEntry = CloudListing["books"][number]
-type Snapshot = { book: Book; position: Position; percent: number; turnedAt: number }
+type Snapshot = { book: Book; position: Position; percent: number; finished: boolean; turnedAt: number }
 
 /** Display settings and their choices, in dialog order. */
 const DISPLAY: { [K in keyof Display]: { title: string; choices: Array<{ value: Display[K]; title: string }> } } = {
@@ -131,14 +133,17 @@ export default Plugin.define({
       context.ui.toast.show({ title: "Reader", message, variant })
     const failure = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-    // The position on the book's last screen, as the panel last laid it out: that screen counts as 100 %.
-    const [endAt, setEndAt] = createSignal<{ key: string; spine: number; offset: number }>()
+    // Where a forward page turn reached the book's last screen: finished (100 %) while the reader stays there.
+    const [finishedAt, setFinishedAt] = createSignal<{ key: string; spine: number; offset: number }>()
+    const finished = () => {
+      const b = book()
+      const pos = position()
+      const at = finishedAt()
+      return !!b && at?.key === b.key && at.spine === pos.spine && at.offset === pos.offset
+    }
     const percent = () => {
       const b = book()
-      if (!b) return 0
-      const pos = position()
-      const end = endAt()
-      return progressOf(b.chapters, pos, end?.key === b.key && end.spine === pos.spine && end.offset === pos.offset)
+      return b ? progressOf(b.chapters, position(), finished()) : 0
     }
 
     // Debounced save of the current position; flushed on close and unload.
@@ -152,6 +157,7 @@ export default Plugin.define({
       if (!b) return
       const pos = position()
       const value = percent()
+      const done = finished()
       const times = { ...(turnedAt !== undefined ? { turnedAt } : {}), opened, now: Date.now() }
       turnedAt = undefined
       void setStore((draft) => {
@@ -164,6 +170,7 @@ export default Plugin.define({
           spine: pos.spine,
           offset: pos.offset,
           percent: value,
+          finished: done,
           ...savedTimes(previous, times),
         }
         draft.current = b.key
@@ -193,8 +200,11 @@ export default Plugin.define({
       return paragraphs
     }
 
-    /** `user`: a page turn or chapter jump by the reader, as opposed to opening or resuming. */
-    const goTo = async (pos: Position, user = true) => {
+    /**
+     * `user`: a page turn or chapter jump by the reader, as opposed to opening or resuming.
+     * `finish`: a forward turn onto the book's last screen (or a finish saved there).
+     */
+    const goTo = async (pos: Position, user = true, finish = false) => {
       const b = book()
       if (!b) return
       if (user) {
@@ -202,6 +212,7 @@ export default Plugin.define({
         lastTurn = { key: b.key, at: turnedAt }
         scheduleIdlePush()
       }
+      setFinishedAt(finish ? { key: b.key, ...pos } : undefined)
       setPosition(pos)
       setNotice("")
       scheduleSave()
@@ -229,7 +240,7 @@ export default Plugin.define({
       const b = book()
       if (!b) return undefined
       const turnedAt = Math.max(store.books[b.key]?.updatedAt ?? 0, lastTurn.key === b.key ? lastTurn.at : 0)
-      return { book: b, position: position(), percent: percent(), turnedAt }
+      return { book: b, position: position(), percent: percent(), finished: finished(), turnedAt }
     }
     const setCloud = (key: string, cloud: Saved["cloud"]) =>
       void setStore((draft) => {
@@ -366,7 +377,7 @@ export default Plugin.define({
       turnedAt = undefined
       setBook(b)
       setChapter(undefined)
-      await goTo(pos, false)
+      await goTo(pos, false, savedFinish(saved, pos))
       flush(true)
       if (!start) void syncPull(b, true)
       return b
@@ -627,21 +638,18 @@ export default Plugin.define({
 
       // Keys pressed while a chapter loads are ignored: its page count is not known yet.
       const ready = () => chapter()?.key === book()?.key && chapter()?.spine === position().spine
-      // No next page: the book counts as read to the end (100 %), until the reader turns back.
-      createEffect(() => {
-        const b = book()
-        if (!b || !ready()) return
-        const pos = position()
-        setEndAt(atBookEnd(b.chapters, pos.spine, lines(), height(), pos.offset) ? { key: b.key, ...pos } : undefined)
-      })
+      // A forward turn onto the last screen finishes the book (100 %) until the reader moves away.
       const nextPage = async () => {
         const b = book()
         if (!b || !ready()) return
-        const offset = nextScreen(lines(), height(), position().offset)
-        if (offset !== undefined) return goTo({ spine: position().spine, offset })
-        const next = nextChapter(b.chapters, position().spine, 1)
-        if (next === undefined) return setNotice("End of the book")
-        await goTo({ spine: next, offset: 0 })
+        const from = position()
+        const turn = await turnForward(b.chapters, from, lines(), height(), async (spine) => {
+          const paragraphs = await ensureChapter(b, spine)
+          return paragraphs ? wrap(paragraphs) : undefined
+        })
+        if (book()?.key !== b.key || position() !== from) return
+        if (!turn.end || (turn.finished && !finished())) await goTo(turn.to, true, turn.finished)
+        if (turn.end) setNotice("End of the book")
       }
       const previousPage = async () => {
         const b = book()
