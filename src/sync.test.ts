@@ -95,7 +95,13 @@ test("a patch changes only the position fields, progress and dates, byte for byt
   // Floats like 1633.0 survive (a JSON round trip would write 1633).
   assert.ok(String(patched.extraAttributes).includes("1633.0") && String(patched.extraAttributes).includes('"a":1.0'))
 
-  // Unsafe docs are left alone.
+  // Unsafe docs are left alone, and so is a doc with no usable position (none is made up).
+  const unread = book("b", { extraAttributes: extra("") })
+  assert.equal(cloudReading(unread).totalPage, 129)
+  assert.equal(cloudReading(unread).point, undefined)
+  assert.equal(patchBookDoc(unread, { fields, percent: 1, finished: false, now: 1 }), undefined)
+  const unusable = book("c", { extraAttributes: extra(`"current_page_position_v3":"{}","current_page":"",`) })
+  assert.equal(patchBookDoc(unusable, { fields, percent: 1, finished: false, now: 1 }), undefined)
   assert.equal(patchBookDoc({ ...doc, modeType: 1 }, { fields, percent: 1, finished: false, now: 1 }), undefined)
   assert.equal(patchBookDoc({ ...doc, _rev: undefined }, { fields, percent: 1, finished: false, now: 1 }), undefined)
   assert.equal(patchBookDoc({ ...doc, extraAttributes: "{not json" }, { fields, percent: 1, finished: false, now: 1 }), undefined)

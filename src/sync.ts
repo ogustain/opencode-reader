@@ -425,7 +425,8 @@ export const PATCHED = {
 /**
  * The book doc with a new reading position: the three position strings,
  * `progress`, `user_doc_data_update_time`, `device_model` and `updatedAt`;
- * `_cv` is dropped. Undefined when the doc cannot be patched safely.
+ * `_cv` is dropped. Undefined when the doc cannot be patched safely, or has
+ * no usable position yet to start from (none is ever made up).
  */
 export function patchBookDoc(
   doc: Doc,
@@ -437,6 +438,7 @@ export function patchBookDoc(
   const total = docTotal(doc)
   if (!total || total <= 0) return undefined
   const base: NeoPosition | undefined = POSITION_KEYS.map((key) => parseNeoPosition(backend[key])).find((p) => neoPoint(p))
+  if (!base) return undefined
   const positions = Object.fromEntries(
     POSITION_KEYS.map((key) => {
       const own = parseNeoPosition(backend[key])

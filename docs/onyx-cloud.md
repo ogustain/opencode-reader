@@ -67,8 +67,8 @@ Library documents share the channel and differ by `modeType`:
 - `fileSyncStatus: 1` appears after "Upload source file" on the device. It is
   a hint only: the download is what counts.
 - Not every book has a document, and some documents have no
-  `extraAttributes` (no position: the plugin then reads the percentage only
-  and never writes).
+  `extraAttributes`, or no usable position in it (no position: the plugin
+  then reads the percentage only and never writes; it never makes one up).
 
 ### `extraAttributes`
 

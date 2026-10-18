@@ -321,7 +321,10 @@ export default Plugin.define({
             }
             const now = Date.now()
             const patched = patchBookDoc(doc, { fields, percent: percent as number, finished: finished === true, now })
-            if (!patched) return { ok: false, state: "error", error: "this book's cloud record has an unexpected shape" }
+            if (!patched) {
+              const error = reading.point ? "this book's cloud record has an unexpected shape" : "no reading position in the cloud yet: open the book once on the BOOX"
+              return { ok: false, state: "error", error }
+            }
             saveBackup(backupFile, doc, now)
             try {
               await onyx.putDoc(patched as CloudDoc)
