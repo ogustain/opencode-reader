@@ -170,6 +170,22 @@ export function nextChapter(chapters: readonly number[], spine: number, dir: 1 |
   return undefined
 }
 
+/**
+ * On the book's last screen: no next screen in this chapter (its wrapped
+ * `lines`) and no later chapter with text.
+ */
+export function atBookEnd(chapters: readonly number[], spine: number, lines: readonly Line[], height: number, offset: number): boolean {
+  return nextScreen(lines, height, offset) === undefined && nextChapter(chapters, spine, 1) === undefined
+}
+
+/**
+ * Progress shown and sent: 100 % on the last screen (the position is its
+ * start, short of the end), else the position's percentage.
+ */
+export function progressOf(chapters: readonly number[], position: Position, atEnd: boolean): number {
+  return atEnd ? 100 : toPercent(chapters, position)
+}
+
 /** Table of contents: chapters with text, titled from the TOC or "Chapter N", with the % at their start. */
 export function contents(
   chapters: readonly number[],

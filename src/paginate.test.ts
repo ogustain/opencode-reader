@@ -1,7 +1,8 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
-  booxHint, chooseStart, column, contents, fromPercent, justify, lastScreen, layout, lineAt, nextChapter, nextScreen, previousScreen, savedTimes, screenAt, toPercent,
+  atBookEnd, booxHint, chooseStart, column, contents, fromPercent, justify, lastScreen, layout, lineAt, nextChapter, nextScreen, previousScreen,
+  progressOf, savedTimes, screenAt, toPercent,
 } from "./paginate.ts"
 import { chapterLength, type Paragraph } from "./text.ts"
 import type { Display, Line } from "./paginate.ts"
@@ -77,6 +78,25 @@ test("turning pages walks the whole chapter, both ways", () => {
   assert.deepEqual(screenAt([], 10, 0), { first: 0, lines: [], page: 0, pages: 1 })
   assert.equal(nextScreen([], 10, 0), undefined)
   assert.equal(previousScreen([], 10, 0), undefined)
+})
+
+test("the book's last screen counts as 100 %, and turning back goes below", () => {
+  const lines = layout(paragraphs, 12)
+  const height = 3
+  const length = chapterLength(paragraphs)
+  const chapters = [500, length, 0] // The last chapter has no text.
+  let last = 0
+  for (let next = nextScreen(lines, height, 0); next !== undefined; next = nextScreen(lines, height, next)) last = next
+  const end = { spine: 1, offset: last }
+  assert.ok(toPercent(chapters, end) < 100) // The position is the start of the screen.
+  assert.equal(atBookEnd(chapters, 1, lines, height, last), true)
+  assert.equal(progressOf(chapters, end, true), 100)
+  const back = previousScreen(lines, height, last)!
+  assert.equal(atBookEnd(chapters, 1, lines, height, back), false)
+  assert.ok(progressOf(chapters, { spine: 1, offset: back }, false) < 100)
+  // The same screen in an earlier chapter is not the end; a taller screen is.
+  assert.equal(atBookEnd([length, 500], 0, lines, height, last), false)
+  assert.equal(atBookEnd(chapters, 1, lines, lines.length, 0), true)
 })
 
 test("position and percentage round trip", () => {

@@ -14,11 +14,11 @@
  * when a push fails, the panel and the sidebar show "Boox: go to N %".
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
-import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
 import type { OnyxState } from "./onyx"
 import {
-  booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, lastScreen, layout, nextChapter, nextScreen, previousScreen, savedTimes, screenAt, toPercent,
-  type Display, type Position,
+  atBookEnd, booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, lastScreen, layout, nextChapter, nextScreen, previousScreen,
+  progressOf, savedTimes, screenAt, type Display, type Position,
 } from "./paginate"
 import {
   ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type OpenResult,
@@ -131,9 +131,14 @@ export default Plugin.define({
       context.ui.toast.show({ title: "Reader", message, variant })
     const failure = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+    // The position on the book's last screen, as the panel last laid it out: that screen counts as 100 %.
+    const [endAt, setEndAt] = createSignal<{ key: string; spine: number; offset: number }>()
     const percent = () => {
       const b = book()
-      return b ? toPercent(b.chapters, position()) : 0
+      if (!b) return 0
+      const pos = position()
+      const end = endAt()
+      return progressOf(b.chapters, pos, end?.key === b.key && end.spine === pos.spine && end.offset === pos.offset)
     }
 
     // Debounced save of the current position; flushed on close and unload.
@@ -622,6 +627,13 @@ export default Plugin.define({
 
       // Keys pressed while a chapter loads are ignored: its page count is not known yet.
       const ready = () => chapter()?.key === book()?.key && chapter()?.spine === position().spine
+      // No next page: the book counts as read to the end (100 %), until the reader turns back.
+      createEffect(() => {
+        const b = book()
+        if (!b || !ready()) return
+        const pos = position()
+        setEndAt(atBookEnd(b.chapters, pos.spine, lines(), height(), pos.offset) ? { key: b.key, ...pos } : undefined)
+      })
       const nextPage = async () => {
         const b = book()
         if (!b || !ready()) return

@@ -103,6 +103,19 @@ test("a patch changes only the position fields, progress and dates, byte for byt
   assert.equal(setBackendFields('{"backend":{}}', { a: 1 }), '{"backend":{"a":1}}')
 })
 
+test("a push from the last screen writes total/total, the real position, and reads back as finished", () => {
+  const doc = book("a", { readingStatus: 1, extraAttributes: extra(`"current_page_position_v3":${JSON.stringify(v2)},"user_doc_data_update_time":5,`) })
+  // The last screen starts inside the chapter: the position says so, the progress says the end.
+  const fields = { chapterIndex: 9, nodePosition: 4321, textOffset: 7, chapterStartPosition: 9000, chapterEndPosition: 9900, chapterID: "c9", xpath: [1, 3, 8, 0] }
+  const patched = patchBookDoc(doc, { fields, percent: 100, now: 99 })!
+  assert.equal(patched.progress, "129/129")
+  assert.equal(patched.readingStatus, 1) // Left to NeoReader.
+  const reading = cloudReading(patched)
+  assert.equal(reading.point?.nodePosition, 4321)
+  assert.equal(reading.point?.textOffset, 7)
+  assert.equal(cloudLibrary([patched]).books[0].finished, true)
+})
+
 test("progress uses the doc's page count, from page 1", () => {
   assert.equal(progressFor(23.4, 129), "30/129")
   assert.equal(progressFor(0, 1398), "1/1398")
