@@ -94,6 +94,11 @@ once your position reached the cloud. When the cloud cannot carry it, it
 shows **Boox: go to 47 %** instead: use NeoReader's "go to" to jump there.
 The sidebar's **Reading** section shows the open book and its percentage.
 
+The book's last screen counts as 100 %: the book is sent to the BOOX as
+finished (its progress becomes the last page, its position stays on that
+screen), `/books` hides it, and the sidebar section goes away until you open
+an unfinished book. Turning back a page goes below 100 % again.
+
 Display settings (`s`, saved for all books): text width (80, 100 or 66
 columns, or the full panel), paragraph spacing (blank line, or a first-line
 indent), line spacing (normal or airy) and alignment (left or justified).

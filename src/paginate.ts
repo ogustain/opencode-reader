@@ -196,6 +196,14 @@ export function contents(
   )
 }
 
+/**
+ * A book read to the end: 100 % here, or finished on the Boox (100 %) with no
+ * page turn here since the Boox last read it (re-reading here wins).
+ */
+export function isFinished(local: { percent: number; updatedAt: number }, boox?: { percent: number; lastAccess: number }): boolean {
+  return local.percent >= 100 || (!!boox && boox.percent >= 100 && boox.lastAccess >= local.updatedAt)
+}
+
 /** "Boox: go to N %" when OpenCode is at least 1 % ahead of the last known Boox position. */
 export function booxHint(localPercent: number, booxPercent: number | undefined): number | undefined {
   if (booxPercent === undefined || !Number.isFinite(booxPercent)) return undefined

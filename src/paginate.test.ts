@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
-  atBookEnd, booxHint, chooseStart, column, contents, fromPercent, justify, lastScreen, layout, lineAt, nextChapter, nextScreen, previousScreen,
+  atBookEnd, booxHint, chooseStart, column, contents, fromPercent, isFinished, justify, lastScreen, layout, lineAt, nextChapter, nextScreen, previousScreen,
   progressOf, savedTimes, screenAt, toPercent,
 } from "./paginate.ts"
 import { chapterLength, type Paragraph } from "./text.ts"
@@ -239,4 +239,14 @@ test("opens at the Boox position only when the Boox read is newer", () => {
   assert.equal(chooseStart(undefined, { lastAccess: 0, percent: 10 }), "local")
   assert.equal(chooseStart(undefined, { lastAccess: 5 }), "local")
   assert.equal(chooseStart(undefined, undefined), "local")
+})
+
+test("a book is finished at 100 % here, or on the Boox unless read here since", () => {
+  assert.equal(isFinished({ percent: 100, updatedAt: 5 }), true)
+  assert.equal(isFinished({ percent: 99.9, updatedAt: 5 }), false)
+  assert.equal(isFinished({ percent: 40, updatedAt: 5 }, { percent: 100, lastAccess: 9 }), true)
+  assert.equal(isFinished({ percent: 40, updatedAt: 0 }, { percent: 100, lastAccess: 0 }), true)
+  // Turned back here after the Boox finished it: reading again.
+  assert.equal(isFinished({ percent: 40, updatedAt: 10 }, { percent: 100, lastAccess: 9 }), false)
+  assert.equal(isFinished({ percent: 40, updatedAt: 0 }, { percent: 99, lastAccess: 9 }), false)
 })

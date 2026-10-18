@@ -32,7 +32,8 @@ import {
   type PushResult,
 } from "./rpc.ts"
 import {
-  cloudLibrary, cloudReading, decidePush, parseProgress, patchBookDoc, toLocal, toNeo, type CloudLibrary, type NeoRef, type OwnPush,
+  cloudLibrary, cloudReading, decidePush, parseProgress, patchBookDoc, toLocal, toNeo, withPushedProgress, type CloudLibrary, type NeoRef,
+  type OwnPush,
 } from "./sync.ts"
 
 const BOOX_MIN_INTERVAL_MS = 60_000
@@ -322,6 +323,9 @@ export default Plugin.define({
             saveBackup(backupFile, doc, now)
             try {
               await onyx.putDoc(patched as CloudDoc)
+              // The cached listing shows the new %, and hides a book finished here, before the next library read.
+              cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, patched.progress) }
+              await save("cloud", cloud)
               return { ok: true, pushed: true, at: now }
             } catch (error) {
               if (stateOf(error) !== "conflict" || attempt > 0) throw error

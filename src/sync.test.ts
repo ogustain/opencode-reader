@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mapChapter } from "./neoposition.ts"
 import {
-  cloudLibrary, cloudReading, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, progressFor, pushQueue, setBackendFields, toLocal, toNeo,
+  cloudLibrary, cloudReading, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, progressFor, pushQueue, setBackendFields, toLocal, toNeo, withPushedProgress,
   type NeoRef,
 } from "./sync.ts"
 
@@ -216,4 +216,16 @@ test("a batch download stops asking the cloud after a token refusal, and says it
   assert.deepEqual(result, { downloaded: 2, onBoox: 2, failed: ["e"], expired: true })
   const fine = await downloadBatch(["a"], async () => ({ ok: true }))
   assert.equal(fine.expired, false)
+})
+
+test("a push finishing a book hides it from the cached library at once", () => {
+  const library = cloudLibrary([book("a", { progress: "128/129" }), book("b", { progress: "3/10" })])
+  assert.equal(library.books[0].finished, false)
+  const after = withPushedProgress(library.books, library.books[0].id, "129/129")
+  assert.deepEqual([after[0].finished, after[0].current, after[0].total, after[0].percent], [true, 129, 129, 100])
+  assert.deepEqual(after[1], library.books[1])
+  assert.equal(libraryTree({ collections: [], books: after }).root.books.length, 1)
+  // A push short of the end updates the %, and an unreadable progress leaves the cache as it was.
+  assert.equal(withPushedProgress(library.books, library.books[1].id, "5/10")[1].percent, 50)
+  assert.deepEqual(withPushedProgress(library.books, library.books[0].id, undefined), library.books)
 })

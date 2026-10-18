@@ -17,8 +17,8 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createEffect, createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
 import type { OnyxState } from "./onyx"
 import {
-  atBookEnd, booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, lastScreen, layout, nextChapter, nextScreen, previousScreen,
-  progressOf, savedTimes, screenAt, type Display, type Position,
+  atBookEnd, booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, lastScreen, layout, nextChapter, nextScreen,
+  previousScreen, progressOf, savedTimes, screenAt, type Display, type Position,
 } from "./paginate"
 import {
   ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type OpenResult,
@@ -790,6 +790,11 @@ export default Plugin.define({
       const current = () => (store.current ? store.books[store.current] : undefined)
       const value = () => (book() && book()!.key === store.current ? percent() : (current()?.percent ?? 0))
       const hint = () => (cloudCarries(current()) ? undefined : booxHint(value(), current()?.boox?.percent))
+      // A finished book leaves the sidebar; opening an unfinished one brings it back.
+      const shown = () => {
+        const s = current()
+        return s && !isFinished({ percent: value(), updatedAt: s.updatedAt }, s.boox) ? s : undefined
+      }
       const reopen = async () => {
         const s = current()
         if (!s || !store.current) return
@@ -798,7 +803,7 @@ export default Plugin.define({
         openPanel()
       }
       return (
-        <Show when={current()}>
+        <Show when={shown()}>
           {(s) => (
             <box flexDirection="column">
               <box flexDirection="row" gap={1} onMouseUp={() => void setView((draft) => void (draft.open = !draft.open)).catch(() => {})}>

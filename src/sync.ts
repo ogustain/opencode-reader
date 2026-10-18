@@ -70,6 +70,16 @@ export function parseProgress(value: unknown): { current: number; total: number 
   return { current: Math.min(Number(m[1]), Number(m[2])), total: Number(m[2]) }
 }
 
+/**
+ * The cached library after a push wrote `progress` to book `id`: its page
+ * count and %, and finished at total/total, until the next library read.
+ */
+export function withPushedProgress(books: readonly CloudBook[], id: string, progress: unknown): CloudBook[] {
+  const p = parseProgress(progress)
+  if (!p) return [...books]
+  return books.map((b) => (b.id === id ? { ...b, current: p.current, total: p.total, percent: (p.current / p.total) * 100, finished: p.current >= p.total } : b))
+}
+
 /** EPUB books, collections and memberships of the library channel. */
 export function cloudLibrary(docs: readonly Doc[]): CloudLibrary {
   const memberOf = new Map<string, Set<string>>()
