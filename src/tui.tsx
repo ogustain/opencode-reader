@@ -273,7 +273,7 @@ export default Plugin.define({
       if (!(await settings())?.cloud) return
       const own = ack?.pushedAt !== undefined && ack.turnedAt !== undefined ? { pushedAt: ack.pushedAt, turnedAt: ack.turnedAt } : undefined
       const result = (await reader
-        .push({ path: s.book.path, booxPath: s.book.booxPath, spine: s.position.spine, offset: s.position.offset, percent: s.percent, turnedAt: s.turnedAt, ...(own ? { own } : {}) })
+        .push({ path: s.book.path, booxPath: s.book.booxPath, spine: s.position.spine, offset: s.position.offset, percent: s.percent, finished: s.finished, turnedAt: s.turnedAt, ...(own ? { own } : {}) })
         .catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PushResult
       if (!result.ok) {
         noteCloud(result.state, result.error)

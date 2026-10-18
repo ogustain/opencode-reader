@@ -297,9 +297,15 @@ export function pushQueue<S extends { turnedAt: number }>(send: (key: string, sn
   }
 }
 
-/** `cur/total` pages for a percentage, on the doc's own page count. */
-export function progressFor(percent: number, total: number): string {
-  const current = Math.min(total, Math.max(1, Math.round((Math.min(100, Math.max(0, percent)) / 100) * total)))
+/**
+ * `cur/total` pages for a percentage, on the doc's own page count: total/total
+ * only for a book finished here, else from page 1 up to total - 1 (a
+ * one-page book unfinished is 0/1).
+ */
+export function progressFor(percent: number, total: number, finished: boolean): string {
+  if (finished) return `${total}/${total}`
+  const last = total - 1
+  const current = Math.min(last, Math.max(Math.min(1, last), Math.round((Math.min(100, Math.max(0, percent)) / 100) * total)))
   return `${current}/${total}`
 }
 
@@ -397,7 +403,10 @@ export const PATCHED = {
  * `progress`, `user_doc_data_update_time`, `device_model` and `updatedAt`;
  * `_cv` is dropped. Undefined when the doc cannot be patched safely.
  */
-export function patchBookDoc(doc: Doc, input: { fields: Record<string, number | string | number[]>; percent: number; now: number }): Doc | undefined {
+export function patchBookDoc(
+  doc: Doc,
+  input: { fields: Record<string, number | string | number[]>; percent: number; finished: boolean; now: number },
+): Doc | undefined {
   if (doc.modeType !== 4 || typeof doc._rev !== "string" || typeof doc.extraAttributes !== "string") return undefined
   const backend = backendOf(doc)
   if (!backend) return undefined
@@ -417,5 +426,5 @@ export function patchBookDoc(doc: Doc, input: { fields: Record<string, number | 
   })
   if (!extraAttributes) return undefined
   const { _cv: _dropped, ...rest } = doc
-  return { ...rest, progress: progressFor(input.percent, total), updatedAt: input.now, extraAttributes }
+  return { ...rest, progress: progressFor(input.percent, total, input.finished), updatedAt: input.now, extraAttributes }
 }

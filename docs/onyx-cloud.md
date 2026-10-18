@@ -129,6 +129,9 @@ What the plugin does, and the only write it ever makes:
    Then parse both strings and check that nothing else changed; any doubt
    refuses the write.
 3. Set `progress` and `updatedAt`, drop `_cv`, leave every other field as is.
+   `progress` is `total/total` only for a book finished in the reader;
+   otherwise it is the percentage on `total`, clamped to `1..total-1`
+   (`0/1` for an unfinished one-page book).
 4. Save the document as it was to the local backup ring (last 20).
 5. `PUT {gateway}<uid>%23<docUniqueId>` with the `_rev`. A 409 means the
    document changed meanwhile: retry once from step 1.

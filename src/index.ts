@@ -282,7 +282,7 @@ export default Plugin.define({
         }
       },
       push: async (input): Promise<PushResult> => {
-        const { path, booxPath, spine, offset, percent, turnedAt, own } = (input ?? {}) as Record<string, unknown>
+        const { path, booxPath, spine, offset, percent, finished, turnedAt, own } = (input ?? {}) as Record<string, unknown>
         const ownPush = own as OwnPush | undefined
         const knownPush = typeof ownPush?.pushedAt === "number" && typeof ownPush.turnedAt === "number" ? ownPush : undefined
         if (typeof path !== "string" || !within(path, roots) || typeof booxPath !== "string") return { ok: false, state: "error", error: "invalid book" }
@@ -318,7 +318,7 @@ export default Plugin.define({
               fields.chapterEndPosition = point.chapterEndPosition
             }
             const now = Date.now()
-            const patched = patchBookDoc(doc, { fields, percent: percent as number, now })
+            const patched = patchBookDoc(doc, { fields, percent: percent as number, finished: finished === true, now })
             if (!patched) return { ok: false, state: "error", error: "this book's cloud record has an unexpected shape" }
             saveBackup(backupFile, doc, now)
             try {

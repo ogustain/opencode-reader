@@ -75,7 +75,7 @@ test("a patch changes only the position fields, progress and dates, byte for byt
   )
   const doc = { ...book("a", { extraAttributes: original, updatedAt: 1, createdAt: 0 }), _cv: "cv" }
   const fields = { chapterIndex: 3, nodePosition: 40, textOffset: 2, chapterStartPosition: 2000, chapterEndPosition: 2600, chapterID: "c3", xpath: [1, 3, 2, 0] }
-  const patched = patchBookDoc(doc, { fields, percent: 23.4, now: 99 })!
+  const patched = patchBookDoc(doc, { fields, percent: 23.4, finished: false, now: 99 })!
   assert.ok(patched)
   // Top level: only progress, updatedAt and extraAttributes differ; _cv is gone.
   const changed = Object.keys({ ...doc, ...patched }).filter((k) => JSON.stringify((doc as Record<string, unknown>)[k]) !== JSON.stringify(patched[k]))
@@ -96,9 +96,9 @@ test("a patch changes only the position fields, progress and dates, byte for byt
   assert.ok(String(patched.extraAttributes).includes("1633.0") && String(patched.extraAttributes).includes('"a":1.0'))
 
   // Unsafe docs are left alone.
-  assert.equal(patchBookDoc({ ...doc, modeType: 1 }, { fields, percent: 1, now: 1 }), undefined)
-  assert.equal(patchBookDoc({ ...doc, _rev: undefined }, { fields, percent: 1, now: 1 }), undefined)
-  assert.equal(patchBookDoc({ ...doc, extraAttributes: "{not json" }, { fields, percent: 1, now: 1 }), undefined)
+  assert.equal(patchBookDoc({ ...doc, modeType: 1 }, { fields, percent: 1, finished: false, now: 1 }), undefined)
+  assert.equal(patchBookDoc({ ...doc, _rev: undefined }, { fields, percent: 1, finished: false, now: 1 }), undefined)
+  assert.equal(patchBookDoc({ ...doc, extraAttributes: "{not json" }, { fields, percent: 1, finished: false, now: 1 }), undefined)
   assert.equal(setBackendFields('{"other":{}}', { a: 1 }), undefined)
   assert.equal(setBackendFields('{"backend":{}}', { a: 1 }), '{"backend":{"a":1}}')
 })
@@ -107,7 +107,7 @@ test("a push from the last screen writes total/total, the real position, and rea
   const doc = book("a", { readingStatus: 1, extraAttributes: extra(`"current_page_position_v3":${JSON.stringify(v2)},"user_doc_data_update_time":5,`) })
   // The last screen starts inside the chapter: the position says so, the progress says the end.
   const fields = { chapterIndex: 9, nodePosition: 4321, textOffset: 7, chapterStartPosition: 9000, chapterEndPosition: 9900, chapterID: "c9", xpath: [1, 3, 8, 0] }
-  const patched = patchBookDoc(doc, { fields, percent: 100, now: 99 })!
+  const patched = patchBookDoc(doc, { fields, percent: 100, finished: true, now: 99 })!
   assert.equal(patched.progress, "129/129")
   assert.equal(patched.readingStatus, 1) // Left to NeoReader.
   const reading = cloudReading(patched)
@@ -116,11 +116,31 @@ test("a push from the last screen writes total/total, the real position, and rea
   assert.equal(cloudLibrary([patched]).books[0].finished, true)
 })
 
-test("progress uses the doc's page count, from page 1", () => {
-  assert.equal(progressFor(23.4, 129), "30/129")
-  assert.equal(progressFor(0, 1398), "1/1398")
-  assert.equal(progressFor(100, 54), "54/54")
-  assert.equal(progressFor(140, 54), "54/54")
+test("progress uses the doc's page count, from page 1, and total/total only for a finished book", () => {
+  assert.equal(progressFor(23.4, 129, false), "30/129")
+  assert.equal(progressFor(0, 1398, false), "1/1398")
+  assert.equal(progressFor(100, 54, true), "54/54")
+  assert.equal(progressFor(40, 54, true), "54/54")
+  // Unfinished: at most total - 1, however close to the end.
+  assert.equal(progressFor(99.9, 129, false), "128/129")
+  assert.equal(progressFor(100, 54, false), "53/54")
+  assert.equal(progressFor(140, 54, false), "53/54")
+  // A one-page book: 0/1 until finished, then 1/1.
+  assert.equal(progressFor(0, 1, false), "0/1")
+  assert.equal(progressFor(99.9, 1, false), "0/1")
+  assert.equal(progressFor(99.9, 1, true), "1/1")
+})
+
+test("going back below 100 % unfinishes the book in the patch and the cached library", () => {
+  const doc = book("a", { progress: "129/129", extraAttributes: extra(`"current_page_position_v3":${JSON.stringify(v2)},`) })
+  const fields = { chapterIndex: 9, nodePosition: 4000, textOffset: 0 }
+  const library = cloudLibrary([doc])
+  assert.equal(library.books[0].finished, true)
+  const patched = patchBookDoc(doc, { fields, percent: 99.9, finished: false, now: 99 })!
+  assert.equal(patched.progress, "128/129")
+  const after = withPushedProgress(library.books, library.books[0].id, patched.progress)
+  assert.equal(after[0].finished, false)
+  assert.equal(libraryTree({ collections: [], books: after }).root.books.length, 1)
 })
 
 test("push only a new position read here after the Boox last saved", () => {
