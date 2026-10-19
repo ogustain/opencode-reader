@@ -4,7 +4,7 @@
  * One chapter is decoded at a time; nothing keeps a whole book in memory.
  */
 import { createHash, randomBytes } from "node:crypto"
-import { closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, writeSync, type Dirent } from "node:fs"
+import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, posix, relative, resolve, sep } from "node:path"
 import { decodeXml, fileSource, openZip, readPackage, resolveHref, type Zip } from "./epub.ts"
@@ -211,10 +211,38 @@ function contentHash(path: string): string {
   return hash.digest("hex")
 }
 
+/** Refusal of a file system without hard links: a free name cannot be taken without a risk of replacing a file. */
+export const NO_HARD_LINKS = "can't copy safely on this filesystem"
+
+/**
+ * Links the finished `temp` (in `dir`) to `name`, or `name (2)`, `(3)`…: the
+ * link never replaces a file. `temp` is removed in every case. Returns the new
+ * path; throws `NO_HARD_LINKS` on a file system without hard links.
+ */
+export function publishCopy(temp: string, dir: string, name: string, link: (from: string, to: string) => void = linkSync): string {
+  try {
+    const stem = name.replace(/\.epub$/i, "")
+    for (let n = 1; ; n++) {
+      const dest = join(dir, n === 1 ? name : `${stem} (${n}).epub`)
+      try {
+        link(temp, dest)
+        return dest
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === "EEXIST") continue
+        if (code === "EPERM" || code === "ENOTSUP" || code === "ENOSYS" || code === "EMLINK" || code === "EOPNOTSUPP") throw new Error(NO_HARD_LINKS)
+        throw error
+      }
+    }
+  } finally {
+    rmSync(temp, { force: true })
+  }
+}
+
 /**
  * Copies `file` into `dir` under `name`, or `name (2)`, `(3)`…: a 0600 temp
- * file in `dir`, written whole and flushed, then linked to a free name (the
- * link never replaces a file) and removed. Returns the new path.
+ * file in `dir`, written whole and flushed, then published by `publishCopy`.
+ * Returns the new path.
  */
 function copyInto(file: string, dir: string, name: string): string {
   const temp = join(dir, `.${randomBytes(6).toString("hex")}.epub.tmp`)
@@ -236,31 +264,11 @@ function copyInto(file: string, dir: string, name: string): string {
     } finally {
       closeSync(out)
     }
-    const stem = name.replace(/\.epub$/i, "")
-    for (let n = 1; ; n++) {
-      const dest = join(dir, n === 1 ? name : `${stem} (${n}).epub`)
-      try {
-        linkSync(temp, dest)
-        rmSync(temp, { force: true })
-        return dest
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code
-        if (code === "EEXIST") continue
-        // A file system without hard links: rename to a name seen free.
-        if (code !== "EPERM" && code !== "ENOTSUP" && code !== "ENOSYS" && code !== "EMLINK" && code !== "EOPNOTSUPP") throw error
-        try {
-          lstatSync(dest)
-          continue
-        } catch {
-          renameSync(temp, dest)
-          return dest
-        }
-      }
-    }
   } catch (error) {
     rmSync(temp, { force: true })
     throw error
   }
+  return publishCopy(temp, dir, name)
 }
 
 /**
@@ -354,7 +362,7 @@ export function addBooks(source: string, dir: string): AddResult {
       hashes.set(dest, hashOf(file))
       result.added.push({ path: dest, key: bookKey({ file: dest }), title })
     } catch (error) {
-      skip(`copy failed (${(error as NodeJS.ErrnoException).code ?? "error"})`)
+      skip((error as Error).message === NO_HARD_LINKS ? NO_HARD_LINKS : `copy failed (${(error as NodeJS.ErrnoException).code ?? "error"})`)
     }
   }
   return result

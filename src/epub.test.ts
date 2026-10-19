@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
 import { bufferSource, decodeXml, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
-import { addBooks, bookKey, buildIndex, cacheFile, MAX_NOTE, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
+import { addBooks, bookKey, buildIndex, cacheFile, MAX_NOTE, NO_HARD_LINKS, neoRefs, publishCopy, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
 /** `size` / `compressed` override the sizes declared in the central directory (malformed archives). */
@@ -409,4 +409,24 @@ test("adding books: a folder's EPUBs three levels deep; non-EPUB and DRM files a
   const own = addBooks(dir, dir)
   assert.deepEqual([own.added, own.skipped.map((s) => s.reason)], [[], ["already there", "already there"]])
   assert.deepEqual(readdirSync(dir).sort(), names)
+})
+
+test("adding books: a file system without hard links refuses the copy and leaves no temp file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  await writeFile(join(dir, "book.epub"), "first")
+  const temp = join(dir, ".x.epub.tmp")
+  await writeFile(temp, "second")
+  const unsupported = () => {
+    throw Object.assign(new Error("link"), { code: "ENOTSUP" })
+  }
+  assert.throws(() => publishCopy(temp, dir, "book.epub", unsupported), new RegExp(NO_HARD_LINKS))
+  // Nothing replaced, nothing renamed, no temp file left.
+  assert.deepEqual(readdirSync(dir), ["book.epub"])
+  assert.equal(readFileSync(join(dir, "book.epub"), "utf8"), "first")
+
+  // With hard links: a free name is taken, the existing file is kept.
+  await writeFile(temp, "second")
+  assert.equal(publishCopy(temp, dir, "book.epub"), join(dir, "book (2).epub"))
+  assert.deepEqual(readdirSync(dir).sort(), ["book (2).epub", "book.epub"])
+  assert.equal(readFileSync(join(dir, "book.epub"), "utf8"), "first")
 })
