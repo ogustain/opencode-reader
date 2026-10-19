@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
-import { bufferSource, EpubError, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
+import { bufferSource, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
 import { bookKey, buildIndex, cacheFile, neoRefs, readChapter, readChapterMap, readMeta, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
@@ -241,4 +241,33 @@ test("library: keys and cache names are stable and path-safe", () => {
   assert.match(file, /^\/cache\/[0-9a-f]{16}-x\.epub$/)
   assert.notEqual(cacheFile("/cache", "/b/x.epub", 10), cacheFile("/cache", "/b/x.epub", 11))
   assert.match(cacheFile("/c", "/b/L’été: vol 2?.epub", 1), /-L_été_ vol 2_\.epub$/)
+})
+
+test("a book's decompressed bytes are budgeted across entries, before inflating", () => {
+  const archive = openZip(bufferSource(zip([{ name: "a", data: "x".repeat(600) }, { name: "b", data: "y".repeat(600) }])), { budget: 1000 })
+  assert.equal(archive.read("a").length, 600)
+  assert.throws(() => archive.read("b"), /too large once decompressed/)
+  assert.throws(() => archive.read("a"), /too large once decompressed/) // Reading again counts again.
+})
+
+test("a spine repeating one large chapter is decoded once, within the budget", async () => {
+  const big = chapter("Big", "<p>" + "word ".repeat(220_000) + "</p>") // About 1.1 MB, deflates to a few KB.
+  const repeats = Math.ceil(MAX_BOOK_INFLATE / Buffer.byteLength(big)) + 10
+  const repeatedOpf = opf.replace(/<spine[\s\S]*<\/spine>/, `<spine>${'<itemref idref="c1"/>'.repeat(repeats)}</spine>`)
+  const dir = await mkdtemp(join(tmpdir(), "reader-spine-"))
+  const path = join(dir, "repeat.epub")
+  const data = zip([
+    { name: "mimetype", data: "application/epub+zip", store: true },
+    { name: "META-INF/container.xml", data: container },
+    { name: "OEBPS/content.opf", data: repeatedOpf },
+    { name: "OEBPS/text/ch1.xhtml", data: big },
+  ])
+  assert.ok(data.length < 64 * 1024, `${data.length} bytes`)
+  await writeFile(path, data)
+  const index = buildIndex(path)
+  assert.equal(index.chapters.length, repeats)
+  assert.ok(index.chapters.every((c) => c.chars === index.chapters[0].chars && c.chars > 1_000_000))
+  const refs = neoRefs(path)
+  assert.equal(refs.length, repeats)
+  assert.equal(refs.at(-1)!.end, repeats * Buffer.byteLength(big))
 })

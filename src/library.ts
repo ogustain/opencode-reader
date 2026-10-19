@@ -87,10 +87,16 @@ export function readMeta(path: string): { title: string; author?: string } {
 export function buildIndex(path: string): BookIndex {
   return withZip(path, (zip) => {
     const pkg = readPackage(zip, fallback(path))
+    // A document the spine repeats is decoded once.
+    const seen = new Map<string, BookIndex["chapters"][number]>()
     const chapters = pkg.spine.map((doc) => {
+      const known = seen.get(doc)
+      if (known) return known
       const paragraphs = xhtmlToParagraphs(zip.read(doc).toString("utf8"))
       const heading = pkg.toc[doc] ?? paragraphs.find((p) => p.heading)?.text.replace(/\s+/g, " ")
-      return { ...(heading ? { title: heading.slice(0, 80) } : {}), chars: paragraphs.length ? chapterLength(paragraphs) : 0 }
+      const chapter = { ...(heading ? { title: heading.slice(0, 80) } : {}), chars: paragraphs.length ? chapterLength(paragraphs) : 0 }
+      seen.set(doc, chapter)
+      return chapter
     })
     return { title: pkg.title, ...(pkg.author ? { author: pkg.author } : {}), chapters }
   })
@@ -100,8 +106,10 @@ export function buildIndex(path: string): BookIndex {
 export function neoRefs(path: string): NeoRef[] {
   return withZip(path, (zip) => {
     let start = 0
+    const sizes = new Map<string, number>() // A document the spine repeats is inflated once.
+    const size = (href: string) => sizes.get(href) ?? sizes.set(href, zip.read(href).length).get(href)!
     return readPackage(zip, fallback(path)).refs.map((ref) => {
-      const bytes = ref.href && zip.has(ref.href) ? zip.read(ref.href).length : 0
+      const bytes = ref.href && zip.has(ref.href) ? size(ref.href) : 0
       const out = { id: ref.id, spine: ref.spine, start, end: start + bytes }
       start += bytes
       return out

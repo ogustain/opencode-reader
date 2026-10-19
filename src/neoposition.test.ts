@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
-  chapterNodes, formatNeoPosition, mapChapter, neoPoint, neoToOffset, offsetToNeo, parseNeoPosition, withNeoFields,
+  chapterNodes, formatNeoPosition, mapChapter, MAX_DEPTH, MAX_NODES, neoPoint, neoToOffset, offsetToNeo, parseNeoPosition, withNeoFields,
 } from "./neoposition.ts"
 
 const sample =
@@ -149,4 +149,18 @@ test("alignment always terminates, and falls back to proportional offsets past i
   const capped = mapChapter("<html><body><p>Some words here.</p></body></html>", { maxSteps: 3 })
   assert.equal(capped.count, 0)
   assert.equal(neoToOffset(capped, { xpath: [0, 0, 0, 0], nodePosition: 15, textOffset: 2 }).exact, false)
+})
+
+test("a hostile chapter is refused before its node paths are built", () => {
+  const nested = (depth: number) => `<html><body>${"<div>".repeat(depth)}x${"</div>".repeat(depth)}</body></html>`
+  assert.ok(chapterNodes(nested(MAX_DEPTH - 3)).length > 0)
+  const started = Date.now()
+  assert.throws(() => chapterNodes(nested(2000)), /too deeply nested/) // 6 KB that once made 2M path entries.
+  assert.throws(() => mapChapter(nested(2000)), /too deeply nested/)
+  assert.throws(() => chapterNodes(`<html><body>${"<br/>".repeat(MAX_NODES + 1)}</body></html>`), /too many elements/)
+  assert.ok(Date.now() - started < 2000)
+})
+
+test("a chapter source over 16 MiB is not aligned", () => {
+  assert.throws(() => mapChapter(`<html><body><p>${"a".repeat(16 * 1024 * 1024)}</p></body></html>`), /too large/)
 })

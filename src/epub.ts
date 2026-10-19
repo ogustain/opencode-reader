@@ -49,6 +49,8 @@ type Entry = { name: string; method: number; flags: number; compressed: number; 
 export const MAX_ENTRY = 64 * 1024 * 1024
 /** Largest central directory we read (65535 entries with long names fit). */
 export const MAX_CENTRAL_DIRECTORY = 16 * 1024 * 1024
+/** Bytes read or inflated per opened book, all entries together (repeated reads count again). */
+export const MAX_BOOK_INFLATE = 256 * 1024 * 1024
 
 export type Zip = {
   readonly names: string[]
@@ -57,7 +59,8 @@ export type Zip = {
   close(): void
 }
 
-export function openZip(source: ByteSource): Zip {
+export function openZip(source: ByteSource, options: { budget?: number } = {}): Zip {
+  let budget = options.budget ?? MAX_BOOK_INFLATE
   const tailLength = Math.min(source.size, 22 + 0xffff)
   const tail = source.read(source.size - tailLength, tailLength)
   let eocd = -1
@@ -104,6 +107,9 @@ export function openZip(source: ByteSource): Zip {
       // Declared sizes are checked before any read; the actual size after inflating too.
       if (entry.size > MAX_ENTRY || entry.compressed > MAX_ENTRY) throw new EpubError(`${name} is too large`)
       if (entry.method === 0 && entry.compressed !== entry.size) throw new EpubError(`corrupt ZIP entry ${name}`)
+      // The declared size is checked after inflating, so it bounds the book's total too.
+      if (entry.size > budget) throw new EpubError("book too large once decompressed (over 256 MiB read)")
+      budget -= entry.size
       const header = source.read(entry.offset, 30)
       if (header.length < 30 || header.readUInt32LE(0) !== 0x04034b50) throw new EpubError(`corrupt ZIP entry ${name}`)
       const start = entry.offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28)

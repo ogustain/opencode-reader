@@ -133,11 +133,30 @@ const VOID = new Set(["br", "img", "hr", "meta", "link", "input", "col", "area",
 /** Content the plugin does not show (mirrors text.ts). */
 const HIDDEN = new Set(["head", "script", "style", "svg", "math", "noscript", "template"])
 
-/** Elements and visible text nodes (inside body, outside hidden elements) of a chapter, in document order. */
+/** Deepest element nesting mapped (each node keeps its whole path). */
+export const MAX_DEPTH = 256
+/** Most nodes, and path entries over all nodes, mapped in one chapter. */
+export const MAX_NODES = 200_000
+export const MAX_PATH_CELLS = 4_000_000
+/** Largest chapter source aligned for positions (the map holds a few ints per character). */
+export const MAX_MAPPED_CHAPTER = 16 * 1024 * 1024
+
+/**
+ * Elements and visible text nodes (inside body, outside hidden elements) of a
+ * chapter, in document order. A chapter nested deeper than `MAX_DEPTH`, or
+ * with more than `MAX_NODES` nodes or `MAX_PATH_CELLS` path entries, is
+ * refused before its paths are built.
+ */
 export function chapterNodes(xhtml: string): ChapterNode[] {
   type Frame = { name: string; count: number; path: number[]; hidden: boolean; body: boolean }
   const stack: Frame[] = [{ name: "#document", count: 0, path: [], hidden: false, body: false }]
   const nodes: ChapterNode[] = []
+  let cells = 0
+  /** Checked before the node's path is copied. */
+  const room = (depth: number) => {
+    cells += depth
+    if (nodes.length >= MAX_NODES || cells > MAX_PATH_CELLS) throw new Error("chapter too complex to locate positions in (too many elements)")
+  }
   const re = /<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|<\?[\s\S]*?\?>|<![^>]*>|<(\/?)([A-Za-z_][\w:.-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>|([^<]+)/g
   for (const m of xhtml.matchAll(re)) {
     const top = stack[stack.length - 1]
@@ -150,7 +169,10 @@ export function chapterNodes(xhtml: string): ChapterNode[] {
     const text = m[1] ?? m[6]
     if (text !== undefined) {
       const index = top.count++
-      if (!top.hidden && top.body) nodes.push({ path: [...top.path, index], at: m.index!, text: m[1] !== undefined ? text : decodeEntities(text) })
+      if (!top.hidden && top.body) {
+        room(top.path.length + 1)
+        nodes.push({ path: [...top.path, index], at: m.index!, text: m[1] !== undefined ? text : decodeEntities(text) })
+      }
       continue
     }
     const name = m[3].toLowerCase().replace(/^.*:/, "")
@@ -160,8 +182,10 @@ export function chapterNodes(xhtml: string): ChapterNode[] {
       continue
     }
     const index = top.count++
+    room(top.path.length + 1)
     nodes.push({ path: [...top.path, index], at: m.index! })
     if (m[5] || VOID.has(name)) continue
+    if (stack.length > MAX_DEPTH) throw new Error(`chapter too deeply nested to locate positions in (over ${MAX_DEPTH} levels)`)
     stack.push({ name, count: 0, path: [...top.path, index], hidden: top.hidden || HIDDEN.has(name), body: top.body || name === "body" })
   }
   return nodes
@@ -199,6 +223,7 @@ const codePoint = (text: string, i: number) => String.fromCodePoint(text.codePoi
  * left empty and positions fall back to proportional ones (`exact: false`).
  */
 export function mapChapter(xhtml: string, options: { maxSteps?: number } = {}): ChapterMap {
+  if (xhtml.length > MAX_MAPPED_CHAPTER) throw new Error("chapter too large to locate positions in (over 16 MiB)")
   const paragraphs = xhtmlToParagraphs(xhtml)
   const flat = paragraphs.map((p) => p.text).join("\n")
   const nodes = chapterNodes(xhtml)
