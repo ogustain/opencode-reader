@@ -25,7 +25,7 @@ import {
 } from "./library.ts"
 import type { ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
-import { createFetcher, createLock, liveCopies, type CacheManifest } from "./sources.ts"
+import { createFetcher, createFreshReads, createLock, liveCopies, type CacheManifest } from "./sources.ts"
 import {
   connectOnyx, createOnyx, defaultBackupFile, defaultSessionFile, defaultSettingsFile, defaultSyncFile, defaultTokenFile, disconnectOnyx, OnyxError,
   onyxServer, readMarks, saveBackup, updateMark, type CloudDoc, type OnyxState,
@@ -155,23 +155,37 @@ export default Plugin.define({
     // Onyx cloud library (books, collections): asked at most once a minute, last result kept.
     let cloud: CloudCache = (await load<CloudCache>("cloud")) ?? { state: "off", message: "Onyx cloud not checked yet", collections: [], books: [] }
     let lastCloud = 0
-    let cloudAsking: Promise<CloudCache> | undefined
-    const askCloud = (): Promise<CloudCache> =>
-      (cloudAsking ??= (async () => {
+    // Listing writes are stored in the order they were made.
+    const cloudSaves = createLock()
+    const saveCloud = () => {
+      const value = cloud
+      return cloudSaves(() => save("cloud", value))
+    }
+    const cloudReads = createFreshReads(
+      async () => {
         lastCloud = Date.now()
         try {
-          cloud = { state: "ok", message: "", checkedAt: Date.now(), ...cloudLibrary(await onyx.library()) }
-          await save("cloud", cloud)
+          return { ok: true as const, library: cloudLibrary(await onyx.library()) }
         } catch (error) {
-          cloud = { ...cloud, state: stateOf(error), message: message(error) }
+          return { ok: false as const, error }
         }
-        return cloud
-      })().finally(() => (cloudAsking = undefined)))
-    /** Another account (or none): its library is read afresh at the next use. */
+      },
+      async (read) => {
+        if (!read.ok) {
+          cloud = { ...cloud, state: stateOf(read.error), message: message(read.error) }
+          return
+        }
+        cloud = { state: "ok", message: "", checkedAt: Date.now(), ...read.library }
+        await saveCloud()
+      },
+    )
+    const askCloud = () => cloudReads.ask()
+    /** Another account (or none): its library is read afresh at the next use; a read under way is dropped. */
     const forgetCloud = () => {
+      cloudReads.forget()
       lastCloud = 0
       cloud = { state: "off", message: "Onyx cloud not checked yet", collections: [], books: [] }
-      void save("cloud", cloud)
+      void saveCloud()
     }
     /** Doc id of the cloud book at a Boox path; the library is fetched again when it is not known. */
     const cloudBook = async (booxPath: string) => {
@@ -294,7 +308,7 @@ export default Plugin.define({
       cloud: async (input): Promise<CloudListing> => {
         const refresh = (input as { refresh?: boolean } | undefined)?.refresh === true
         if (refresh && Date.now() - lastCloud >= CLOUD_MIN_INTERVAL_MS) await askCloud()
-        else if (cloudAsking) await cloudAsking
+        else await cloudReads.pending()
         if (!onyx.configured()) cloud = { ...cloud, state: "off", message: "Onyx cloud not configured (see README)" }
         const manifest = await cacheManifest()
         const cachedBy = new Map(Object.entries(manifest).map(([file, m]) => [`${m.booxPath}:${m.size}`, file]))
