@@ -2,7 +2,7 @@ import { Rpc } from "@opencode/plugin/rpc"
 import type { AdbState, BooxBook } from "./adb.ts"
 import type { BookIndex } from "./library.ts"
 import type { OnyxState } from "./onyx.ts"
-import type { CloudBook, CloudCollection, CloudSide, OwnPush } from "./sync.ts"
+import type { Action, CloudBook, CloudCollection } from "./sync.ts"
 import type { Paragraph } from "./text.ts"
 
 /** A readable book on the server's disk (local folder or Boox cache). */
@@ -47,19 +47,19 @@ export type CloudPosition = {
   exact?: boolean
   /** The Boox's page-based percentage. */
   percent?: number
-  updateTime: number
   lastAccess: number
-  deviceModel?: string
-  /** Whether the cloud holds one of our writes (the server's record of them). */
-  side?: CloudSide
+  /** What to do with the local reading (`reconcile`). */
+  action: Action
+  /** The cloud reading (`readingPrint`), sent back with `agree` once applied. */
+  print: string
   /** The cloud has a reading position, but in no chapter of this copy. */
   unmapped?: true
 }
 export type PullResult = { ok: true; cloud: CloudPosition } | { ok: false; state: OnyxState; error: string }
 export type PushResult =
   | { ok: true; pushed: true; at: number }
-  /** `ack`: the cloud already holds our write of this reading (or a later one). */
-  | { ok: true; pushed: false; reason: string; ack?: OwnPush }
+  /** `pull`: the cloud's reading is the one to take (`reconcile`). */
+  | { ok: true; pushed: false; reason: string; pull?: true }
   | { ok: false; state: OnyxState; error: string }
 
 const object = { type: "object" } as const
@@ -81,9 +81,11 @@ export const ReaderRpc = Rpc.define({
     settings: { input: object, output: object },
     /** { refresh?: boolean } → CloudListing (the cloud is asked at most once a minute) */
     cloud: { input: object, output: object },
-    /** { path, booxPath, turnedAt? } → PullResult (`turnedAt`: page-turn time of the local reading, recorded with the revision seen) */
+    /** { path, booxPath, gen, turnedAt, receipt? } → PullResult (the local reading's generation, page-turn time, last push receipt) */
     pull: { input: object, output: object },
-    /** { path, booxPath, spine, offset, percent, turnedAt, own?: OwnPush } → PushResult (GET, then PUT of the book doc) */
+    /** { booxPath, print, gen } → { ok } (the cloud reading `print` was applied locally as generation `gen`) */
+    agree: { input: object, output: object },
+    /** { path, booxPath, spine, offset, percent, finished, gen, turnedAt, receipt? } → PushResult (GET, then PUT of the book doc) */
     push: { input: object, output: object },
   },
   events: {},

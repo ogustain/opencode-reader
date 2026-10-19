@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mapChapter } from "./neoposition.ts"
 import {
-  cloudLibrary, cloudReading, cloudSide, batchSummary, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, pendingPushes, progressFor, pushQueue, settles, syncFailure, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
+  cloudLibrary, cloudReading, batchSummary, downloadBatch, libraryTree, patchBookDoc, pendingPushes, progressFor, pushQueue, settles, syncFailure, setBackendFields, toLocal, toNeo, withPushedProgress,
   type NeoRef,
 } from "./sync.ts"
 
@@ -149,42 +149,6 @@ test("going back below 100 % unfinishes the book in the patch and the cached lib
   assert.equal(libraryTree({ collections: [], books: after }).root.books.length, 1)
 })
 
-test("push only a new position read here after the Boox last saved", () => {
-  const local = { spine: 2, offset: 100 }
-  assert.deepEqual(decidePush({ cloudTime: 5, local }), { push: false, reason: "no local reading" })
-  assert.deepEqual(decidePush({ turnedAt: 5, cloudTime: 5, local }), { push: false, reason: "the Boox is newer" })
-  assert.deepEqual(decidePush({ turnedAt: 6, cloudTime: 5, local, cloud: { spine: 2, offset: 100 } }), { push: false, reason: "same position" })
-  assert.deepEqual(decidePush({ turnedAt: 6, cloudTime: 5, local, cloud: { spine: 2, offset: 90 } }), { push: true })
-  assert.deepEqual(decidePush({ turnedAt: 6, cloudTime: 5, local }), { push: true })
-})
-
-test("the same position with a new progress or finished state is pushed, not acknowledged as sent", () => {
-  const end = { spine: 9, offset: 4000 }
-  const at = (local: string, cloud: unknown) => decidePush({ turnedAt: 6, cloudTime: 5, local: end, cloud: end, progress: { local, cloud } })
-  // Back, then forward again onto the last screen the cloud already holds unfinished: finish it.
-  assert.deepEqual(at("129/129", "128/129"), { push: true })
-  // Finished in the cloud, unfinished here at the same screen: unfinish it.
-  assert.deepEqual(at("128/129", "129/129"), { push: true })
-  assert.deepEqual(at("127/129", "128/129"), { push: true })
-  assert.deepEqual(at("128/129", undefined), { push: true })
-  // Nothing new: skipped (the TUI acknowledges it).
-  assert.deepEqual(at("129/129", "129/129"), { push: false, reason: "same position" })
-  assert.deepEqual(at("128/129", " 128 / 129 "), { push: false, reason: "same position" })
-  // A new position is pushed whatever the progress.
-  assert.deepEqual(decidePush({ turnedAt: 6, cloudTime: 5, local: end, cloud: { spine: 9, offset: 0 }, progress: { local: "128/129", cloud: "128/129" } }), { push: true })
-})
-
-test("pull a newer Boox position, not our own push", () => {
-  const cloud = { spine: 4, offset: 0 }
-  const local = { spine: 2, offset: 100 }
-  assert.equal(decidePull({ updateTime: 10, lastAccess: 10, local, cloud }), true)
-  assert.equal(decidePull({ turnedAt: 20, updateTime: 10, lastAccess: 10, local, cloud }), false)
-  assert.equal(decidePull({ turnedAt: 20, updateTime: 10, lastAccess: 30, local, cloud }), true) // Opened on the Boox since.
-  assert.equal(decidePull({ turnedAt: 5, updateTime: 10, lastAccess: 0, local: cloud, cloud }), false)
-  assert.equal(decidePull({ turnedAt: 5, updateTime: 10, lastAccess: 8, side: { kind: "ours", turnedAt: 5 }, local, cloud }), false)
-  assert.equal(decidePull({ turnedAt: 5, updateTime: 10, lastAccess: 8, local }), false)
-})
-
 test("positions convert through the spine, skipping chapters the plugin does not show", () => {
   const chapter = '<?xml version="1.0"?>\n<html><body><p>First words.</p><p>Second line here.</p></body></html>'
   const map = mapChapter(chapter)
@@ -204,56 +168,17 @@ test("positions convert through the spine, skipping chapters the plugin does not
   assert.equal(toNeo({ spine: 3, offset: 0 }, refs, map), undefined)
 })
 
-test("our own write is recognised by its device, update time and progress, on both sides", () => {
-  const local = { spine: 2, offset: 100 }
-  // We pushed the reading of t=100; the server stamped it 104 (its clock), while a page turned at 102.
-  const mark = withWrite(undefined, { pushedAt: 104, turnedAt: 100, progress: "20/100" })
-  const ours = cloudSide({ updateTime: 104, deviceModel: "OpenCode", progress: "20/100" }, mark)
-  assert.deepEqual(ours, { kind: "ours", turnedAt: 100 })
-  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, side: ours, local, cloud: { spine: 2, offset: 50 } }), { push: true })
-  assert.deepEqual(decidePush({ turnedAt: 100, cloudTime: 104, side: ours, local, cloud: { spine: 2, offset: 50 } }), { push: false, reason: "already sent" })
-  // The Boox saved since (another device, update time or progress): its time counts.
-  assert.deepEqual(cloudSide({ updateTime: 104, deviceModel: "Go7", progress: "20/100" }, mark), { kind: "changed" })
-  assert.deepEqual(cloudSide({ updateTime: 105, deviceModel: "OpenCode", progress: "20/100" }, mark), { kind: "changed" })
-  assert.deepEqual(cloudSide({ updateTime: 104, deviceModel: "OpenCode", progress: "30/100" }, mark), { kind: "changed" })
-  assert.deepEqual(cloudSide({ updateTime: 104, deviceModel: "OpenCode" }, undefined), { kind: "changed" })
-  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, side: { kind: "changed" }, local }), { push: false, reason: "the Boox is newer" })
-
-  // Reopening: our own write is not pulled back as a Boox position, even if the Boox opened the book since.
-  const cloud = { spine: 2, offset: 50 }
-  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 110, side: ours, local, cloud }), false)
-  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 0, side: { kind: "changed" }, local, cloud }), true)
-  // Another window's later write (same identity) is pulled by a window holding an older reading.
-  assert.equal(decidePull({ turnedAt: 90, updateTime: 104, lastAccess: 0, side: ours, local, cloud }), true)
-})
-
-test("a PUT accepted but unanswered is still known as ours, from the write recorded before it", () => {
-  const local = { spine: 2, offset: 100 }
-  // Recorded before the PUT: stamped 104, carrying the turn of 100. The answer was lost.
-  let mark = withWrite(undefined, { pushedAt: 90, turnedAt: 80 })
-  mark = withWrite(mark, { pushedAt: 104, turnedAt: 100, progress: "20/100" })
-  const side = cloudSide({ updateTime: 104, deviceModel: "OpenCode", progress: "20/100" }, mark)
-  // A page turned at 102 (local clock behind the server's): pushed, not "the Boox is newer".
-  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, side, local, cloud: { spine: 2, offset: 50 } }), { push: true })
-  // And the old cloud position never wins a pull against it.
-  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 0, side, local, cloud: { spine: 2, offset: 50 } }), false)
-  // Only the last writes are kept.
-  for (let i = 0; i < 10; i++) mark = withWrite(mark, { pushedAt: 200 + i, turnedAt: 200 + i })
-  assert.equal(mark.writes!.length, 5)
-  assert.equal(mark.writes![0].pushedAt, 205)
-})
-
 test("pushes run one at a time per book, and the latest waiting snapshot goes next", async () => {
   const sent: Array<[string, number]> = []
   const gates: Array<() => void> = []
-  const push = pushQueue<{ turnedAt: number }>(async (key, s) => {
-    sent.push([key, s.turnedAt])
+  const push = pushQueue<{ gen: number }>(async (key, s) => {
+    sent.push([key, s.gen])
     await new Promise<void>((resolve) => gates.push(resolve))
   })
-  const first = push("a", { turnedAt: 1 })
-  void push("a", { turnedAt: 3 }) // Turned during the push.
-  void push("a", { turnedAt: 2 }) // Older: ignored.
-  void push("b", { turnedAt: 1 }) // Another book: not held up.
+  const first = push("a", { gen: 1 })
+  void push("a", { gen: 3 }) // Turned during the push.
+  void push("a", { gen: 2 }) // Older: ignored.
+  void push("b", { gen: 1 }) // Another book: not held up.
   assert.deepEqual(sent, [["a", 1], ["b", 1]])
   gates.shift()!()
   await new Promise((resolve) => setTimeout(resolve, 0))
@@ -261,7 +186,7 @@ test("pushes run one at a time per book, and the latest waiting snapshot goes ne
   for (const open of gates.splice(0)) open()
   await first
   // Idle again: a new snapshot starts at once.
-  void push("a", { turnedAt: 4 })
+  void push("a", { gen: 4 })
   assert.deepEqual(sent.at(-1), ["a", 4])
   for (const open of gates.splice(0)) open()
 })
@@ -294,51 +219,18 @@ test("a push finishing a book hides it from the cached library at once", () => {
   assert.deepEqual(withPushedProgress(library.books, library.books[0].id, undefined), library.books)
 })
 
-test("a Boox clock ahead does not win when the cloud has not changed since we saw it", () => {
-  const local = { spine: 5, offset: 0 }
-  const boox = { spine: 2, offset: 100 }
-  // The Boox saved at real time 1000, its clock 5 minutes ahead: stamped 301_000. Pulled here at rev 7-a, local reading of 900.
-  const updateTime = 301_000
-  let mark = withSeen(undefined, "7-a", 900)
-  const seen = cloudSide({ updateTime, deviceModel: "Go7", rev: "7-a" }, mark)
-  assert.deepEqual(seen, { kind: "seen", turnedAt: 900 })
-  // Pages turned here at 2000 (before the Boox's skewed stamp): local wins, both ways.
-  assert.deepEqual(decidePush({ turnedAt: 2000, cloudTime: updateTime, side: seen, local, cloud: boox }), { push: true })
-  assert.equal(decidePull({ turnedAt: 2000, updateTime, lastAccess: updateTime, side: seen, local, cloud: boox }), false)
-  // No page turned here since: the clocks still decide (the Boox position opens here).
-  assert.deepEqual(decidePush({ turnedAt: 900, cloudTime: updateTime, side: seen, local, cloud: boox }), { push: false, reason: "the Boox is newer" })
-  assert.equal(decidePull({ turnedAt: 900, updateTime, lastAccess: 0, side: seen, local, cloud: boox }), true)
-
-  // A real change on the Boox since (new rev) and pages turned here too: a conflict, the clocks decide as before.
-  const changed = cloudSide({ updateTime, deviceModel: "Go7", rev: "8-b" }, mark)
-  assert.deepEqual(changed, { kind: "changed" })
-  assert.deepEqual(decidePush({ turnedAt: 2000, cloudTime: updateTime, side: changed, local, cloud: boox }), { push: false, reason: "the Boox is newer" })
-  assert.equal(decidePull({ turnedAt: 2000, updateTime, lastAccess: 0, side: changed, local, cloud: boox }), true)
-  assert.deepEqual(decidePush({ turnedAt: 302_000, cloudTime: updateTime, side: changed, local, cloud: boox }), { push: true })
-
-  // Seen again at the same revision, the later local time is kept; a new revision starts over.
-  mark = withSeen(mark, "7-a", 500)
-  assert.deepEqual(mark.seen, { rev: "7-a", turnedAt: 900 })
-  mark = withSeen(mark, "8-b", 500)
-  assert.deepEqual(mark.seen, { rev: "8-b", turnedAt: 500 })
-  assert.deepEqual(withSeen(mark, "", 600), mark) // No revision (an empty PUT answer): unchanged.
-  // Our own write still wins over a stale "seen" of the same revision.
-  const both = withWrite(withSeen(undefined, "9-c", 100), { pushedAt: 50, turnedAt: 400 })
-  assert.deepEqual(cloudSide({ updateTime: 50, deviceModel: "OpenCode", rev: "9-c" }, both), { kind: "ours", turnedAt: 400 })
-})
-
 test("a due push stays due until settled, and is replayed once per session", () => {
-  // Due for the reading of 200: an answer for an older snapshot does not settle it.
-  assert.equal(settles(200, 150), false)
-  assert.equal(settles(200, 200), true)
-  assert.equal(settles(200, 250), true)
-  assert.equal(settles(undefined, 250), false)
+  // Due for the reading of generation 7: an answer for an older snapshot does not settle it.
+  assert.equal(settles(7, 6), false)
+  assert.equal(settles(7, 7), true)
+  assert.equal(settles(7, 8), true)
+  assert.equal(settles(0, 0), true)
+  assert.equal(settles(undefined, 8), false)
   const books = {
-    due: { pending: 200, booxPath: "/Books/a.epub", updatedAt: 200 },
-    sent: { booxPath: "/Books/b.epub", updatedAt: 300 },
-    local: { pending: 100, updatedAt: 100 }, // Not a Boox book.
-    unread: { pending: 100, booxPath: "/Books/c.epub", updatedAt: 0 },
-    other: { pending: 50, booxPath: "/Books/d.epub", updatedAt: 60 },
+    due: { pending: 7, booxPath: "/Books/a.epub" },
+    sent: { booxPath: "/Books/b.epub" },
+    local: { pending: 3 }, // Not a Boox book.
+    other: { pending: 0, booxPath: "/Books/d.epub" },
   }
   const replayed = new Set<string>()
   assert.deepEqual(pendingPushes(books, replayed), ["due", "other"])

@@ -35,8 +35,7 @@ import {
   type PushResult,
 } from "./rpc.ts"
 import {
-  cloudLibrary, cloudReading, cloudSide, decidePush, docTotal, parseProgress, patchBookDoc, progressFor, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
-  type CloudLibrary, type NeoRef, type OwnPush,
+  cloudLibrary, pullDoc, pushDoc, toLocal, toNeo, withBase, withPushedProgress, type CloudLibrary, type DocIo, type LocalReading, type NeoRef,
 } from "./sync.ts"
 
 const BOOX_MIN_INTERVAL_MS = 60_000
@@ -44,6 +43,13 @@ const CLOUD_MIN_INTERVAL_MS = 60_000
 
 type Json = Parameters<Plugin.Context["storage"]["set"]>[1]
 
+/** The local reading sent by the TUI: `gen`, `turnedAt` and an optional `receipt`; undefined when invalid. */
+function readingOf(input: Record<string, unknown>): LocalReading | undefined {
+  const { gen, turnedAt, receipt } = input
+  const valid = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0
+  if (!valid(gen) || !valid(turnedAt)) return undefined
+  return { gen, turnedAt, ...(valid(receipt) ? { receipt } : {}) }
+}
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 const stateOf = (error: unknown): OnyxState => (error instanceof OnyxError ? error.state : "error")
 type CloudCache = { state: OnyxState; message: string; checkedAt?: number } & CloudLibrary
@@ -186,8 +192,20 @@ export default Plugin.define({
       return map
     }
     const backupFile = defaultBackupFile(dataDir)
-    // Our writes per book doc, recorded before each PUT (see `CloudMark`).
+    // Per book doc: the last agreement and our writes, recorded before each PUT (see `CloudMark`).
     const syncFile = defaultSyncFile(dataDir)
+    /** A book doc's cloud, sync record and positions, for `pullDoc` and `pushDoc`. */
+    const docIo = (id: string, path: string): DocIo => ({
+      getDoc: () => onyx.getDoc(id),
+      putDoc: (doc) => onyx.putDoc(doc as CloudDoc),
+      isConflict: (error) => stateOf(error) === "conflict",
+      mark: () => readMarks(syncFile)[id],
+      setMark: (change) => void updateMark(syncFile, id, change),
+      backup: (doc, now) => saveBackup(backupFile, doc as CloudDoc, now),
+      toLocal: (point) => toLocal(point, refsOf(path), (spine) => mapOf(path, spine)),
+      toNeo: (local) => toNeo(local, refsOf(path), mapOf(path, local.spine)),
+      now: () => Date.now(),
+    })
     // Pushes of one book doc run one at a time (several windows may push it).
     const docLocks = new Map<string, ReturnType<typeof createLock>>()
     const docLock = (id: string) => docLocks.get(id) ?? docLocks.set(id, createLock()).get(id)!
@@ -277,41 +295,34 @@ export default Plugin.define({
         return { ...cloud, books }
       },
       pull: async (input): Promise<PullResult> => {
-        const { path, booxPath, turnedAt } = (input ?? {}) as { path?: string; booxPath?: string; turnedAt?: unknown }
+        const { path, booxPath, ...rest } = (input ?? {}) as Record<string, unknown>
         if (typeof path !== "string" || !within(path, roots) || typeof booxPath !== "string") return { ok: false, state: "error", error: "invalid book" }
+        const local = readingOf(rest)
+        if (!local) return { ok: false, state: "error", error: "invalid position" }
         try {
           const book = await cloudBook(booxPath)
           if (!book) return { ok: false, state: "error", error: "book not in the Onyx cloud (sync off for it?)" }
-          const doc = await onyx.getDoc(book.id)
-          const reading = cloudReading(doc)
-          const progress = parseProgress(doc.progress)
-          const local = reading.point ? toLocal(reading.point, refsOf(path), (spine) => mapOf(path, spine)) : undefined
-          const side = cloudSide({ ...reading, progress: doc.progress, rev: doc._rev }, readMarks(syncFile)[book.id])
-          // Seen at this revision while the local reading dated from `turnedAt`.
-          if (typeof turnedAt === "number" && turnedAt > 0) updateMark(syncFile, book.id, (m) => withSeen(m, doc._rev, turnedAt))
-          return {
-            ok: true,
-            cloud: {
-              ...(local ?? {}),
-              ...(progress ? { percent: (progress.current / progress.total) * 100 } : {}),
-              updateTime: reading.updateTime,
-              lastAccess: reading.lastAccess,
-              ...(reading.deviceModel ? { deviceModel: reading.deviceModel } : {}),
-              side,
-              ...(reading.point && !local ? { unmapped: true as const } : {}),
-            },
-          }
+          return { ok: true, cloud: await pullDoc(docIo(book.id, path), local) }
         } catch (error) {
           return { ok: false, state: stateOf(error), error: message(error) }
         }
       },
+      agree: async (input) => {
+        const { booxPath, print, gen } = (input ?? {}) as Record<string, unknown>
+        if (typeof booxPath !== "string" || typeof print !== "string" || typeof gen !== "number" || !Number.isFinite(gen)) return { ok: false }
+        try {
+          const book = await cloudBook(booxPath)
+          if (book) updateMark(syncFile, book.id, (m) => withBase(m, { cloud: print, local: gen }))
+          return { ok: !!book }
+        } catch {
+          return { ok: false }
+        }
+      },
       push: async (input): Promise<PushResult> => {
-        const { path, booxPath, spine, offset, percent, finished, turnedAt, own } = (input ?? {}) as Record<string, unknown>
-        const ownPush = own as OwnPush | undefined
-        const knownPush = typeof ownPush?.pushedAt === "number" && typeof ownPush.turnedAt === "number" ? ownPush : undefined
+        const { path, booxPath, spine, offset, percent, finished, ...rest } = (input ?? {}) as Record<string, unknown>
         if (typeof path !== "string" || !within(path, roots) || typeof booxPath !== "string") return { ok: false, state: "error", error: "invalid book" }
-        if (![spine, offset, percent, turnedAt].every((n) => typeof n === "number" && Number.isFinite(n))) return { ok: false, state: "error", error: "invalid position" }
-        const local = { spine: spine as number, offset: offset as number }
+        const local = readingOf(rest)
+        if (!local || ![spine, offset, percent].every((n) => typeof n === "number" && Number.isFinite(n))) return { ok: false, state: "error", error: "invalid position" }
         try {
           const book = await cloudBook(booxPath)
           if (!book) return { ok: false, state: "error", error: "book not in the Onyx cloud (sync off for it?)" }
@@ -319,58 +330,15 @@ export default Plugin.define({
           const copy = ((await load<CacheManifest>("cache")) ?? {})[resolve(path)]
           if (!copy || copy.booxPath !== booxPath || (book.size > 0 && copy.size !== book.size))
             return { ok: false, state: "error", error: "the local copy is not the Boox file" }
-          const bookRefs = refsOf(path)
-          return await docLock(book.id)(async (): Promise<PushResult> => {
-            for (let attempt = 0; ; attempt++) {
-              const doc = await onyx.getDoc(book.id)
-              const reading = cloudReading(doc)
-              const cloudLocal = reading.point ? toLocal(reading.point, bookRefs, (s) => mapOf(path, s)) : undefined
-              const total = docTotal(doc)
-              // Our writes: the server's record, and the TUI's last acknowledged one (older versions kept it only there).
-              const mark = readMarks(syncFile)[book.id]
-              const side = cloudSide({ ...reading, progress: doc.progress, rev: doc._rev }, knownPush ? withWrite(mark, knownPush) : mark)
-              const decision = decidePush({
-                turnedAt: turnedAt as number,
-                cloudTime: reading.updateTime,
-                side,
-                local,
-                ...(cloudLocal ? { cloud: { spine: cloudLocal.spine, offset: cloudLocal.offset } } : {}),
-                ...(total ? { progress: { local: progressFor(percent as number, total, finished === true), cloud: doc.progress } } : {}),
-              })
-              if (!decision.push) {
-                if (decision.reason !== "no local reading") updateMark(syncFile, book.id, (m) => withSeen(m, doc._rev, turnedAt as number))
-                const ack = side.kind === "ours" ? { ack: { pushedAt: reading.updateTime, turnedAt: side.turnedAt } } : {}
-                return { ok: true, pushed: false, reason: decision.reason, ...ack }
-              }
-              const fields = toNeo(local, bookRefs, mapOf(path, local.spine))
-              if (!fields) return { ok: false, state: "error", error: "unknown chapter" }
-              // Same chapter as the cloud: keep the byte range NeoReader computed.
-              const point = reading.point
-              if (point?.chapterIndex === fields.chapterIndex && point.chapterStartPosition !== undefined && point.chapterEndPosition !== undefined) {
-                fields.chapterStartPosition = point.chapterStartPosition
-                fields.chapterEndPosition = point.chapterEndPosition
-              }
-              const now = Date.now()
-              const patched = patchBookDoc(doc, { fields, percent: percent as number, finished: finished === true, now })
-              if (!patched) {
-                const error = reading.point ? "this book's cloud record has an unexpected shape" : "no reading position in the cloud yet: open the book once on the BOOX"
-                return { ok: false, state: "error", error }
-              }
-              saveBackup(backupFile, doc, now)
-              // Recorded first: if the answer to the PUT is lost, the next GET still shows this write as ours.
-              updateMark(syncFile, book.id, (m) => withWrite(m, { pushedAt: now, turnedAt: turnedAt as number, progress: String(patched.progress) }))
-              try {
-                const rev = await onyx.putDoc(patched as CloudDoc)
-                updateMark(syncFile, book.id, (m) => withSeen(m, rev, turnedAt as number))
-                // The cached listing shows the new %, and hides a book finished here, before the next library read.
-                cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, patched.progress) }
-                await save("cloud", cloud)
-                return { ok: true, pushed: true, at: now }
-              } catch (error) {
-                if (stateOf(error) !== "conflict" || attempt > 0) throw error
-              }
-            }
-          })
+          const position = { spine: spine as number, offset: offset as number }
+          const result = await docLock(book.id)(() =>
+            pushDoc(docIo(book.id, path), { ...local, position, percent: percent as number, finished: finished === true }),
+          )
+          if (!result.pushed) return { ok: true, ...result }
+          // The cached listing shows the new %, and hides a book finished here, before the next library read.
+          cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, result.progress) }
+          await save("cloud", cloud)
+          return { ok: true, pushed: true, at: result.at }
         } catch (error) {
           return { ok: false, state: stateOf(error), error: message(error) }
         }

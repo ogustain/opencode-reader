@@ -13,7 +13,7 @@ import {
   type NeoPosition,
 } from "./neoposition.ts"
 
-type Doc = Record<string, unknown>
+export type Doc = Record<string, unknown>
 
 /** Said once when the token is refused (shared with the TUI, which cannot import `onyx.ts`). */
 export const EXPIRED_MESSAGE = "Onyx token expired: paste a new one (see README)"
@@ -241,94 +241,79 @@ const same = (a: Local | undefined, b: Local | undefined) => !!a && !!b && a.spi
 export const OWN_DEVICE = "OpenCode"
 
 /**
- * One of our writes of a book doc: the update time it stamps (`pushedAt`, the
- * server's clock), the page-turn time of the reading it carries, and the
- * `progress` it writes when known.
+ * What a book doc's reading is: the position fields a push writes (as read
+ * back) and `progress`, normalized. Not `_rev`, `lastAccess` or `updatedAt`:
+ * opening the book on the Boox without reading leaves it as it is.
  */
-export type OwnPush = { pushedAt: number; turnedAt: number; progress?: string }
-
-/**
- * What the server keeps per book doc across restarts: `writes`, our last
- * attempted writes, each recorded before its PUT (so a PUT whose answer was
- * lost is still known as ours); `seen`, the doc revision at the last pull or
- * push, with the page-turn time the local reading had then (local clock).
- */
-export type CloudMark = { writes?: OwnPush[]; seen?: { rev: string; turnedAt: number } }
-export const WRITES_KEPT = 5
-
-/**
- * The mark having seen revision `rev` while the local reading dated from
- * `turnedAt`. Seen again at the same revision, the latest local time is kept.
- */
-export function withSeen(mark: CloudMark | undefined, rev: unknown, turnedAt: number): CloudMark {
-  if (typeof rev !== "string" || !rev || !Number.isFinite(turnedAt)) return mark ?? {}
-  const before = mark?.seen?.rev === rev ? mark.seen.turnedAt : 0
-  return { ...mark, seen: { rev, turnedAt: Math.max(before, turnedAt) } }
+export function readingPrint(doc: Doc): string {
+  const p = cloudReading(doc).point
+  const progress = parseProgress(doc.progress)
+  return JSON.stringify([
+    p ? [p.chapterIndex, p.chapterID ?? null, p.nodePosition, p.textOffset, p.xpath, p.chapterStartPosition ?? null, p.chapterEndPosition ?? null] : null,
+    progress ? `${progress.current}/${progress.total}` : null,
+  ])
 }
 
+/**
+ * The last readings both sides agreed on: the cloud's (`readingPrint`) and
+ * the local generation (a counter per book, bumped by every local position
+ * change: a page turn, or a cloud position applied).
+ */
+export type Base = { cloud: string; local: number }
+/** One of our writes, recorded before its PUT: the reading it writes and the generation it carries. */
+export type OwnWrite = { print: string; gen: number }
+/** What the server keeps per book doc across restarts (`onyx-sync.json`). */
+export type CloudMark = { base?: Base; writes?: OwnWrite[] }
+export const WRITES_KEPT = 5
+
 /** The mark with one more attempted write, the oldest dropped. */
-export function withWrite(mark: CloudMark | undefined, write: OwnPush): CloudMark {
+export function withWrite(mark: CloudMark | undefined, write: OwnWrite): CloudMark {
   return { ...mark, writes: [...(mark?.writes ?? []), write].slice(-WRITES_KEPT) }
 }
 
-/**
- * Who wrote the reading the cloud doc holds, judged by revisions rather than
- * clocks. "ours": one of our writes (from OpenCode, with its update time and
- * progress), so not a Boox reading; its `turnedAt` is the page-turn time it
- * carried, on the local clock. "seen": the doc is unchanged since the last
- * pull or push (same `_rev`), when the local reading dated from `turnedAt`.
- * "changed": someone else (the Boox) wrote since, dated by its own clock.
- */
-export type CloudSide = { kind: "ours"; turnedAt: number } | { kind: "seen"; turnedAt: number } | { kind: "changed" }
-
-export function cloudSide(cloud: { updateTime: number; deviceModel?: string; progress?: unknown; rev?: unknown }, mark: CloudMark | undefined): CloudSide {
-  const own =
-    cloud.deviceModel === OWN_DEVICE
-      ? [...(mark?.writes ?? [])].reverse().find((w) => w.pushedAt === cloud.updateTime && (w.progress === undefined || w.progress === cloud.progress))
-      : undefined
-  if (own) return { kind: "ours", turnedAt: own.turnedAt }
-  if (mark?.seen && typeof cloud.rev === "string" && cloud.rev === mark.seen.rev) return { kind: "seen", turnedAt: mark.seen.turnedAt }
-  return { kind: "changed" }
+/** The mark with a new agreement, unless it already holds a later local generation. */
+export function withBase(mark: CloudMark | undefined, base: Base): CloudMark {
+  return mark?.base && mark.base.local > base.local ? mark : { ...mark, base }
 }
 
-/**
- * Whether a local reading of `turnedAt` is newer than the cloud's. Our own
- * write, or a doc unchanged since we saw it: newer when the page turned here
- * since (local clock only, so a skewed Boox clock does not matter). Otherwise
- * the Boox wrote since: when the page also turned here since, it is a real
- * conflict, and the clocks decide (`cloudTime`, the Boox's).
- */
-function localIsNewer(turnedAt: number, side: CloudSide, cloudTime: number): boolean {
-  if (side.kind === "ours") return turnedAt > side.turnedAt
-  if (side.kind === "seen" && turnedAt > side.turnedAt) return true
-  return turnedAt > cloudTime
-}
-
-export type PushDecision = { push: true } | { push: false; reason: "no local reading" | "the Boox is newer" | "same position" | "already sent" }
+export type Action = "none" | "push" | "pull"
 
 /**
- * Push only a position the user reached by turning pages after the reading
- * the cloud holds, and only a new one: a new position, or the same one with a
- * new `progress` (the push would write `progress.local`, the cloud holds
- * `progress.cloud`), so finishing or unfinishing on the same screen goes
- * through. When the cloud holds one of our writes (`side`), compare with the
- * page-turn time that write carried, not its update time (the server's
- * clock); a reading no newer than it is "already sent".
+ * The sync decision for one book. The cloud changed when its reading differs
+ * from the base and is not one of our writes (whose generation then becomes
+ * the base); the local reading changed when its generation is past the base.
+ * Neither: nothing. One side: it wins, whatever the clocks say. Both: a real
+ * conflict, the latest of the local page turn and the device's save
+ * (`cloudTime`, its own clock) wins.
+ *
+ * Without a base (older versions, or `onyx-sync.json` lost), once: a doc last
+ * written from OpenCode (`ownDevice`) is ambiguous, so it never moves the
+ * local position; it is pushed over when a page turned here since the last
+ * acknowledged push (`receipt`), else taken as agreed. Any other doc: the
+ * clocks decide. `base`: an agreement to record now.
  */
-export function decidePush(input: {
-  turnedAt?: number
+export function reconcile(input: {
+  cloud: string
+  base?: Base
+  gen: number
+  writes?: readonly OwnWrite[]
+  turnedAt: number
   cloudTime: number
-  side?: CloudSide
-  local: Local
-  cloud?: Local
-  progress?: { local: string; cloud: unknown }
-}): PushDecision {
-  if (!input.turnedAt) return { push: false, reason: "no local reading" }
-  const side = input.side ?? { kind: "changed" }
-  if (!localIsNewer(input.turnedAt, side, input.cloudTime)) return { push: false, reason: side.kind === "ours" ? "already sent" : "the Boox is newer" }
-  if (same(input.local, input.cloud) && (!input.progress || sameProgress(input.progress.local, input.progress.cloud)))
-    return { push: false, reason: "same position" }
-  return { push: true }
+  ownDevice?: boolean
+  receipt?: number
+}): { action: Action; base?: Base } {
+  const own = input.writes?.findLast((w) => w.print === input.cloud)
+  const known = own && !(input.base?.cloud === input.cloud && input.base.local >= own.gen) ? { cloud: input.cloud, local: own.gen } : undefined
+  const base = known ?? input.base
+  const record = known ? { base: known } : {}
+  const newer: Action = input.turnedAt > input.cloudTime ? "push" : "pull"
+  if (!base) {
+    if (!input.ownDevice) return { action: newer }
+    return input.turnedAt > (input.receipt ?? 0) ? { action: "push" } : { action: "none", base: { cloud: input.cloud, local: input.gen } }
+  }
+  const cloudChanged = input.cloud !== base.cloud
+  const localChanged = input.gen > base.local
+  return { action: cloudChanged && localChanged ? newer : cloudChanged ? "pull" : localChanged ? "push" : "none", ...record }
 }
 
 /** Same page count, current page and so finished state (total/total). */
@@ -338,28 +323,104 @@ function sameProgress(a: unknown, b: unknown): boolean {
   return !!pa && !!pb && pa.current === pb.current && pa.total === pb.total && (pa.current >= pa.total) === (pb.current >= pb.total)
 }
 
+/** The local reading the TUI holds: its generation, page-turn time, and its last push receipt from older versions. */
+export type LocalReading = { gen: number; turnedAt: number; receipt?: number }
+
+/** The server's I/O for one book doc (a fake cloud in tests). */
+export type DocIo = {
+  getDoc(): Promise<Doc>
+  putDoc(doc: Doc): Promise<unknown>
+  /** A PUT refused because the doc changed meanwhile (409): read and decide again, once. */
+  isConflict(error: unknown): boolean
+  mark(): CloudMark | undefined
+  setMark(change: (mark: CloudMark | undefined) => CloudMark): void
+  backup(doc: Doc, now: number): void
+  toLocal(point: NeoPoint): (Local & { exact: boolean }) | undefined
+  toNeo(local: Local): Record<string, number | string | number[]> | undefined
+  now(): number
+}
+
+function decide(io: DocIo, doc: Doc, local: LocalReading) {
+  const reading = cloudReading(doc)
+  const print = readingPrint(doc)
+  const mark = io.mark()
+  const base = typeof mark?.base?.cloud === "string" && Number.isFinite(mark.base.local) ? mark.base : undefined
+  const writes = Array.isArray(mark?.writes) ? mark.writes : []
+  const { action, base: agreed } = reconcile({
+    cloud: print,
+    ...(base ? { base } : {}),
+    gen: local.gen,
+    writes,
+    turnedAt: local.turnedAt,
+    cloudTime: reading.updateTime,
+    ownDevice: reading.deviceModel === OWN_DEVICE,
+    ...(local.receipt !== undefined ? { receipt: local.receipt } : {}),
+  })
+  if (agreed) io.setMark((m) => withBase(m, agreed))
+  return { action, print, reading }
+}
+
+/** The cloud reading of a book, in the plugin's terms, with the decision for the local reading. */
+export async function pullDoc(io: DocIo, local: LocalReading) {
+  const doc = await io.getDoc()
+  const { action, print, reading } = decide(io, doc, local)
+  const at = reading.point ? io.toLocal(reading.point) : undefined
+  const progress = parseProgress(doc.progress)
+  return {
+    action,
+    print,
+    ...(at ?? {}),
+    ...(reading.point && !at ? { unmapped: true as const } : {}),
+    ...(progress ? { percent: (progress.current / progress.total) * 100 } : {}),
+    lastAccess: reading.lastAccess,
+  }
+}
+
 /**
- * Open at the cloud position when it differs and is newer than the local
- * reading: a Boox reading saved or opened after the last local page turn, or
- * one of our writes (`side`) carrying a later page turn than the one held
- * here (another window's). Our own write, or a doc unchanged since we saw it,
- * never wins against a page turned here since, even when the Boox opened the
- * book meanwhile.
+ * Sends the local reading when `reconcile` says so (GET, then PUT with the
+ * revision; a 409 decides again, once). The written reading is recorded as
+ * ours before the PUT, the agreement after it. The same position (and
+ * progress) as the cloud's is an agreement, nothing to write. Refusals throw.
  */
-export function decidePull(input: {
-  turnedAt?: number
-  updateTime: number
-  lastAccess: number
-  side?: CloudSide
-  local?: Local
-  cloud?: Local
-}): boolean {
-  if (!input.cloud || same(input.local, input.cloud)) return false
-  const turnedAt = input.turnedAt ?? 0
-  const side = input.side ?? { kind: "changed" }
-  if (side.kind === "ours") return turnedAt < side.turnedAt
-  if (side.kind === "seen" && turnedAt > side.turnedAt) return false
-  return Math.max(input.updateTime, input.lastAccess) > turnedAt
+export async function pushDoc(
+  io: DocIo,
+  local: LocalReading & { position: Local; percent: number; finished: boolean },
+): Promise<{ pushed: true; at: number; progress: unknown } | { pushed: false; reason: "in sync" | "the Boox is newer" | "same position"; pull?: true }> {
+  for (let attempt = 0; ; attempt++) {
+    const doc = await io.getDoc()
+    const { action, print, reading } = decide(io, doc, local)
+    if (action === "pull") return { pushed: false, reason: "the Boox is newer", pull: true }
+    if (action === "none") return { pushed: false, reason: "in sync" }
+    const total = docTotal(doc)
+    const cloudAt = reading.point ? io.toLocal(reading.point) : undefined
+    if (same(local.position, cloudAt) && (!total || sameProgress(progressFor(local.percent, total, local.finished), doc.progress))) {
+      io.setMark((m) => withBase(m, { cloud: print, local: local.gen }))
+      return { pushed: false, reason: "same position" }
+    }
+    const fields = io.toNeo(local.position)
+    if (!fields) throw new Error("unknown chapter")
+    // Same chapter as the cloud: keep the byte range NeoReader computed.
+    const point = reading.point
+    if (point?.chapterIndex === fields.chapterIndex && point.chapterStartPosition !== undefined && point.chapterEndPosition !== undefined) {
+      fields.chapterStartPosition = point.chapterStartPosition
+      fields.chapterEndPosition = point.chapterEndPosition
+    }
+    const now = io.now()
+    const patched = patchBookDoc(doc, { fields, percent: local.percent, finished: local.finished, now })
+    if (!patched) throw new Error(point ? "this book's cloud record has an unexpected shape" : "no reading position in the cloud yet: open the book once on the BOOX")
+    io.backup(doc, now)
+    const write = { print: readingPrint(patched), gen: local.gen }
+    // Recorded first: if the answer to the PUT is lost, the next GET still shows this write as ours.
+    io.setMark((m) => withWrite(m, write))
+    try {
+      await io.putDoc(patched)
+    } catch (error) {
+      if (!io.isConflict(error) || attempt > 0) throw error
+      continue
+    }
+    io.setMark((m) => withBase(m, { cloud: write.print, local: write.gen }))
+    return { pushed: true, at: now, progress: patched.progress }
+  }
 }
 
 /** Said when the cloud's position cannot be placed in the local copy. */
@@ -376,9 +437,9 @@ export function syncFailure(state: string, error: string | undefined): string | 
   return error || "Onyx cloud error"
 }
 
-/** Whether a due push (`pending`, its page-turn time) is settled by an outcome for the reading of `turnedAt`. */
-export function settles(pending: number | undefined, turnedAt: number): boolean {
-  return pending !== undefined && turnedAt >= pending
+/** Whether a due push (`pending`, its generation) is settled by an outcome for the reading of generation `gen`. */
+export function settles(pending: number | undefined, gen: number): boolean {
+  return pending !== undefined && gen >= pending
 }
 
 /**
@@ -386,11 +447,11 @@ export function settles(pending: number | undefined, turnedAt: number): boolean 
  * Boox books with a local reading, not replayed yet (`replayed`).
  */
 export function pendingPushes(
-  books: Record<string, { pending?: number; booxPath?: string; updatedAt: number }>,
+  books: Record<string, { pending?: number; booxPath?: string }>,
   replayed: ReadonlySet<string>,
 ): string[] {
   return Object.entries(books)
-    .filter(([key, b]) => b.pending !== undefined && !!b.booxPath && b.updatedAt > 0 && !replayed.has(key))
+    .filter(([key, b]) => b.pending !== undefined && !!b.booxPath && !replayed.has(key))
     .map(([key]) => key)
 }
 
@@ -398,7 +459,7 @@ export function pendingPushes(
  * One push at a time per book. A snapshot offered while that book's push is
  * running waits, replacing any older waiting one, and is sent right after.
  */
-export function pushQueue<S extends { turnedAt: number }>(send: (key: string, snapshot: S) => Promise<void>): (key: string, snapshot: S) => Promise<void> {
+export function pushQueue<S extends { gen: number }>(send: (key: string, snapshot: S) => Promise<void>): (key: string, snapshot: S) => Promise<void> {
   const running = new Map<string, Promise<void>>()
   const waiting = new Map<string, S>()
   const run = async (key: string, first: S) => {
@@ -414,7 +475,7 @@ export function pushQueue<S extends { turnedAt: number }>(send: (key: string, sn
     const busy = running.get(key)
     if (busy) {
       const queued = waiting.get(key)
-      if (!queued || queued.turnedAt <= snapshot.turnedAt) waiting.set(key, snapshot)
+      if (!queued || queued.gen <= snapshot.gen) waiting.set(key, snapshot)
       return busy
     }
     const started = run(key, snapshot)

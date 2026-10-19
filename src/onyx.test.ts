@@ -487,14 +487,14 @@ test("token, session and backup files that are symbolic links are never followed
   assert.equal(mode(), 0o644)
 })
 
-test("the record of our writes survives a restart, and an unreadable one counts as empty", () => {
+test("the sync record (base and our writes) survives a restart, and an unreadable one counts as empty", () => {
   const dir = mkdtempSync(join(tmpdir(), "opencode-reader-marks-"))
   try {
     const file = join(dir, "onyx-sync.json")
     assert.deepEqual(readMarks(file), {})
-    updateMark(file, "u1#b1", () => ({ writes: [{ pushedAt: 104, turnedAt: 100, progress: "20/100" }] }))
+    updateMark(file, "u1#b1", () => ({ base: { cloud: "[null,null]", local: 3 }, writes: [{ print: "[null,\"20/100\"]", gen: 4 }] }))
     updateMark(file, "u1#b2", () => ({ writes: [] }))
-    assert.deepEqual(readMarks(file)["u1#b1"], { writes: [{ pushedAt: 104, turnedAt: 100, progress: "20/100" }] })
+    assert.deepEqual(readMarks(file)["u1#b1"], { base: { cloud: "[null,null]", local: 3 }, writes: [{ print: "[null,\"20/100\"]", gen: 4 }] })
     assert.equal(statSync(file).mode & 0o777, 0o600)
     writeFileSync(file, "{not json")
     assert.deepEqual(readMarks(file), {})
