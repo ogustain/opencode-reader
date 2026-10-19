@@ -4,8 +4,8 @@ An [OpenCode](https://opencode.ai) V2 plugin to read EPUB books in a session
 panel while your agents work. Add your books, and it remembers each one's
 position to the character.
 
-- Add an EPUB file or a whole folder from `/read`, or drag a file into the
-  terminal after `/read`.
+- Add an EPUB file or a whole folder with `/add <path>`, or from "Add books…"
+  in `/read` (you can drag the file into the terminal).
 - Text-only reading, with contents, notes and display settings.
 - Optional: keep your place in sync with a BOOX e-reader (stock NeoReader
   app) in both directions through the Onyx cloud, and open the books of your
@@ -58,14 +58,17 @@ server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
 
 ## Read
 
-- `/read` (palette: "Reader: read a book"): pick a book, most recent first,
+- `/read` (palette: "Reader: my books"): pick a book, most recent first,
   from `dir` and from the books already fetched from the BOOX. It opens at
   your last position.
-- **Add books…**, always first in `/read`: type the path of an EPUB file or a
-  folder, or drag it into the terminal. A folder adds its EPUBs three levels
-  deep. Books are copied into `dir` (created if missing), and a single book
-  opens at once. A toast sums up: "2 added · 1 already there · 1 refused
-  (DRM)".
+- `/add <path>` (palette: "Reader: add books"): adds that EPUB file or
+  folder. `/add` alone, the palette command and **Add books…** (always first
+  in `/read`) ask for the path: type it, or drag the file or folder into the
+  terminal.
+  - A folder adds its EPUBs three levels deep, at most 500 files at a time.
+  - Books are copied into `dir` (created if missing). A single book opens at
+    once; a book already there opens its copy in `dir`.
+  - A toast sums up: "2 added · 1 already there · 1 refused (DRM)".
   - A book is added only if it opens as for reading: not an EPUB, protected
     (DRM), unreadable or over 512 MiB is refused.
   - Nothing is ever overwritten: a book identical to one in `dir` (same size
@@ -73,8 +76,6 @@ server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
     book with the same file name is copied as `name (2).epub`.
   - With no books yet, `/read` shows just "Add books…" (and "Connect a
     BOOX…"). You can also put EPUB files in `dir` yourself.
-- `/read <path>`: adds that file (or folder) and opens the book; a book
-  already there opens its copy in `dir`.
 
 Keys in the panel (click it to focus it):
 
@@ -130,7 +131,7 @@ the library sync turned on, and optionally
 
 ### `/books`
 
-- `/books` (palette: "Reader: Boox library"): your BOOX collections as on the
+- `/books` (palette: "Reader: BOOX library"): your BOOX collections as on the
   device (collection → sub-collection → book, plus "Not in a collection"),
   EPUB only, each book with its percentage and last read date. Finished books
   are hidden behind "Show finished books". `Esc` goes up one level.
