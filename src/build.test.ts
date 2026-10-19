@@ -6,10 +6,10 @@ import { test } from "node:test"
 
 const root = join(import.meta.dirname, "..")
 
-test("dist/tui.js is up to date with src/tui.tsx (run `npm run build`)", () => {
+test("dist/tui.js is up to date with src/tui.tsx (run `npm run build:tui`)", () => {
   const fresh = execFileSync(process.execPath, [join(root, "scripts", "build-tui.mjs"), "--print"], { cwd: root, encoding: "utf8" })
   const committed = readFileSync(join(root, "dist", "tui.js"), "utf8")
-  assert.ok(committed === fresh, "dist/tui.js is stale: run `npm run build`")
+  assert.ok(committed === fresh, "dist/tui.js is stale: run `npm run build:tui`")
 })
 
 test("dist/tui.js uses Solid's universal JSX and the TypeScript sources", () => {

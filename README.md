@@ -233,14 +233,15 @@ the sync gateway and its file storage), and only when a token is set.
 
 ```sh
 npm install
-npm run build         # src/tui.tsx → dist/tui.js
+npm run build:tui     # src/tui.tsx → dist/tui.js
 npm run typecheck
 npm test              # node --experimental-strip-types --test (Node 22.6+)
 ```
 
-Run `npm run build` after editing `src/tui.tsx` and commit `dist/tui.js`: an
+Run `npm run build:tui` after editing `src/tui.tsx` and commit `dist/tui.js`: an
 installed package gets no Solid JSX transform, so it loads the compiled file
-(a test fails when it is stale).
+(a test fails when it is stale). Don't name the script `build`: npm then
+prepares git installs by running a full `npm install`, which fails.
 
 - `src/index.ts`, the server half: owns files, the device and the network,
   so it also works with a remote OpenCode server.

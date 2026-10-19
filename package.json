@@ -32,7 +32,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/build-tui.mjs",
+    "build:tui": "node scripts/build-tui.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --experimental-strip-types --test src/*.test.ts"
   },
