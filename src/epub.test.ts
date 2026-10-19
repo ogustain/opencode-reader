@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readdirSync } from "node:fs"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
@@ -270,4 +270,25 @@ test("a spine repeating one large chapter is decoded once, within the budget", a
   const refs = neoRefs(path)
   assert.equal(refs.length, repeats)
   assert.equal(refs.at(-1)!.end, repeats * Buffer.byteLength(big))
+})
+
+test("reads are confined to the folders once symbolic links are resolved", async () => {
+  const base = await mkdtemp(join(tmpdir(), "reader-roots-"))
+  const books = join(base, "books")
+  const outside = join(base, "outside")
+  await mkdir(books)
+  await mkdir(outside)
+  await writeFile(join(books, "in.epub"), "PK")
+  await writeFile(join(outside, "secret.epub"), "PK")
+  await symlink(join(outside, "secret.epub"), join(books, "link.epub"))
+  await symlink(outside, join(books, "linked-dir"))
+  assert.ok(within(join(books, "in.epub"), [books]))
+  assert.ok(!within(join(books, "link.epub"), [books]))
+  assert.ok(!within(join(books, "linked-dir", "secret.epub"), [books]))
+  assert.ok(!within(join(books, "..", "outside", "secret.epub"), [books]))
+  assert.ok(!within(join(books, "missing.epub"), [books]))
+  // A folder that is itself a link (books kept elsewhere) still holds its books.
+  await symlink(books, join(base, "alias"))
+  assert.ok(within(join(base, "alias", "in.epub"), [join(base, "alias")]))
+  assert.ok(within(join(books, "in.epub"), [join(base, "alias")]))
 })

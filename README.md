@@ -134,7 +134,8 @@ the position.
    Use `$XDG_DATA_HOME/opencode-reader` or your `dataDir` instead if you set
    one. The `chmod` also covers a file that already existed. The plugin makes
    the token, session and backup files private (0600) whenever it finds them
-   readable by others. Quotes copied with the value are ignored.
+   readable by others, and refuses them when they are symbolic links. Quotes
+   copied with the value are ignored.
 
 When the token expires (after about 6 months) the plugin says "Onyx token
 expired: paste a new one (see README)": repeat steps 2 and 3. Without a

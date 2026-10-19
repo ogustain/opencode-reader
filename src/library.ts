@@ -4,7 +4,7 @@
  * One chapter is decoded at a time; nothing keeps a whole book in memory.
  */
 import { createHash } from "node:crypto"
-import { readdirSync, statSync, type Dirent } from "node:fs"
+import { readdirSync, realpathSync, statSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve, sep } from "node:path"
 import { fileSource, openZip, readPackage, type Zip } from "./epub.ts"
@@ -52,10 +52,23 @@ export function scanEpubs(dir: string, depth = 3): string[] {
   return out
 }
 
-/** True when `path` is inside one of `roots` (book reads are limited to known folders). */
+/**
+ * True when `path` is inside one of `roots` once symbolic links are resolved
+ * (book reads are limited to known folders); false when it does not exist.
+ */
 export function within(path: string, roots: readonly string[]): boolean {
-  const full = resolve(path)
-  return roots.some((root) => full.startsWith(resolve(root) + sep))
+  const real = (p: string) => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return undefined
+    }
+  }
+  const full = real(path)
+  return !!full && roots.some((root) => {
+    const top = real(root)
+    return !!top && full.startsWith(top + sep)
+  })
 }
 
 /** Identity of a file version, for caching its metadata and index. */

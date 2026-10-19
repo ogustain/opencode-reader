@@ -17,7 +17,7 @@
  * Only GET and PUT exist here, and PUT only accepts book docs (modeType 4).
  */
 import { createHash, createHmac, randomBytes } from "node:crypto"
-import { chmodSync, closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs"
+import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { defaultDataDir } from "./paths.ts"
 import { EXPIRED_MESSAGE } from "./sync.ts"
@@ -167,15 +167,33 @@ export function ossBucketOf(buckets: unknown): OssBucket | undefined {
 }
 
 /**
- * Makes one of our files readable by the user only. `writeFileSync`'s mode
- * applies to new files only, so existing ones (or a token file the user
- * created 0644) are fixed here, on every read and write.
+ * Reads one of our private files (token, session, backups); undefined when it
+ * is missing. A symbolic link is refused, never followed, and a file readable
+ * by others (a token file the user created 0644) is made 0600 first.
  */
-export function makePrivate(file: string): void {
+export function readPrivateFile(file: string): string | undefined {
+  let fd: number
   try {
-    if (statSync(file).mode & 0o077) chmodSync(file, 0o600)
-  } catch {
-    // Missing file, or not ours to change.
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT") return undefined
+    if (code === "ELOOP") throw new OnyxError("error", `refused: ${basename(file)} is a symbolic link`)
+    throw error
+  }
+  try {
+    const stat = fstatSync(fd)
+    if (!stat.isFile()) throw new OnyxError("error", `refused: ${basename(file)} is not a file`)
+    if (stat.mode & 0o077) {
+      try {
+        fchmodSync(fd, 0o600)
+      } catch {
+        // Not ours to change.
+      }
+    }
+    return readFileSync(fd, "utf8")
+  } finally {
+    closeSync(fd)
   }
 }
 
@@ -212,12 +230,7 @@ export const BACKUPS_KEPT = 20
  */
 export function saveBackup(file: string, doc: CloudDoc, now: number, keep = BACKUPS_KEPT): void {
   let ring: unknown[] = []
-  let text: string | undefined
-  try {
-    text = readFileSync(file, "utf8")
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-  }
+  const text = readPrivateFile(file)
   if (text !== undefined) {
     let old: unknown
     try {
@@ -235,15 +248,20 @@ export function saveBackup(file: string, doc: CloudDoc, now: number, keep = BACK
 /** Session ids are refreshed this long before they expire. */
 const MARGIN_MS = 60 * 60_000
 
-/** The token, without quotes or blanks; a token file readable by others is made 0600 first. */
+/**
+ * The token, without quotes or blanks; a token file readable by others is made
+ * 0600 first. Throws when the token file is a symbolic link.
+ */
 export function readToken(file: string): string | undefined {
-  makePrivate(file)
+  let text: string | undefined
   try {
-    const token = readFileSync(file, "utf8").trim().replace(/^(["'])(.*)\1$/s, "$2").trim()
-    return token || undefined
-  } catch {
+    text = readPrivateFile(file)
+  } catch (error) {
+    if (error instanceof OnyxError) throw error
     return undefined
   }
+  const token = text?.trim().replace(/^(["'])(.*)\1$/s, "$2").trim()
+  return token || undefined
 }
 
 /** Non-reversible token fingerprint stored with the session. */
@@ -355,9 +373,8 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     }
     if (fresh(session, token)) return session
     session = undefined
-    makePrivate(sessionFile)
     try {
-      const saved = JSON.parse(readFileSync(sessionFile, "utf8")) as Session
+      const saved = JSON.parse(readPrivateFile(sessionFile) ?? "") as Session
       if (fresh(saved, token)) return (session = saved)
     } catch {
       // No usable saved session.
@@ -503,7 +520,13 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
   }
 
   return {
-    configured: () => !!readToken(tokenFile),
+    configured: () => {
+      try {
+        return !!readToken(tokenFile)
+      } catch {
+        return true // A refused token file: requests say why.
+      }
+    },
     userId,
     downloadBook,
     async library() {

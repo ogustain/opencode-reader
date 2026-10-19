@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -446,4 +446,39 @@ test("a corrupt backup ring is moved aside, not dropped", () => {
     assert.equal(readFileSync(join(dir, "onyx-backups.json.corrupt-42"), "utf8"), junk)
     assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).map((b: { rev: string }) => b.rev), ["2-r"])
   }
+})
+
+test("token, session and backup files that are symbolic links are never followed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "onyx-"))
+  const target = join(dir, "elsewhere")
+  writeFileSync(target, TOKEN, { mode: 0o644 })
+  chmodSync(target, 0o644)
+  const mode = () => statSync(target).mode & 0o777
+
+  // Token: refused with a clear error, the target left as it was.
+  const tokenFile = join(dir, "token")
+  symlinkSync(target, tokenFile)
+  assert.throws(() => readToken(tokenFile), /token is a symbolic link/)
+  const cloud = fakeCloud()
+  const onyx = createOnyx({ tokenFile, sessionFile: join(dir, "session"), fetch: cloud.fetch, now: () => NOW })
+  assert.equal(onyx.configured(), true)
+  await assert.rejects(onyx.library(), (e: OnyxError) => e.state === "error" && /symbolic link/.test(e.message) && !e.message.includes(TOKEN))
+  assert.equal(cloud.calls.length, 0)
+  assert.equal(mode(), 0o644)
+
+  // Session: the link is not read, and a new session replaces the link, not its target.
+  const paths = files()
+  rmSync(paths.sessionFile, { force: true })
+  symlinkSync(target, paths.sessionFile)
+  await createOnyx({ ...paths, fetch: fakeCloud().fetch, now: () => NOW }).userId()
+  assert.ok(!lstatSync(paths.sessionFile).isSymbolicLink())
+  assert.equal(readFileSync(target, "utf8"), TOKEN)
+  assert.equal(mode(), 0o644)
+
+  // Backups: refused, the target untouched.
+  const backups = join(dir, "backups.json")
+  symlinkSync(target, backups)
+  assert.throws(() => saveBackup(backups, { _id: "u1#b1", _rev: "1-r", modeType: 4 }, 1), /symbolic link/)
+  assert.equal(readFileSync(target, "utf8"), TOKEN)
+  assert.equal(mode(), 0o644)
 })
