@@ -287,6 +287,16 @@ test("a book is finished at 100 % here, or on the Boox unless read here since", 
   // Turned back here after the Boox finished it: reading again.
   assert.equal(isFinished({ percent: 40, updatedAt: 10 }, { percent: 100, lastAccess: 9 }), false)
   assert.equal(isFinished({ percent: 40, updatedAt: 0 }, { percent: 99, lastAccess: 9 }), false)
+  // Finished on the Boox (opened there at 9), its position pulled here at 20, no page turned since: still finished.
+  const pulled = { percent: 99, updatedAt: 20, pulledAt: 20 }
+  assert.equal(isFinished(pulled, { percent: 100, lastAccess: 9 }), true)
+  // One page turned here after the pull: reading again.
+  assert.equal(isFinished({ ...pulled, updatedAt: 25 }, { percent: 100, lastAccess: 9 }), false)
+  // A pull of an unfinished Boox position finishes nothing.
+  assert.equal(isFinished(pulled, { percent: 99, lastAccess: 9 }), false)
+  // Stored before `pulledAt` existed: as before.
+  assert.equal(isFinished({ percent: 40, updatedAt: 20 }, { percent: 100, lastAccess: 9 }), false)
+  assert.equal(isFinished({ percent: 40, updatedAt: 5 }, { percent: 100, lastAccess: 9 }), true)
 })
 
 test("a window holding an older reading never overwrites a newer stored one", () => {

@@ -166,7 +166,8 @@ export default Plugin.define({
 
     // Debounced save of the current position; flushed on close and unload.
     let saveTimer;
-    const flush = (opened = false) => {
+    /** `pulled`: the position is a Boox position just applied. */
+    const flush = (opened = false, pulled = false) => {
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = undefined;
       const b = book();
@@ -199,7 +200,10 @@ export default Plugin.define({
             turnedAt,
             opened,
             now
-          })
+          }),
+          ...(pulled ? {
+            pulledAt: turnedAt
+          } : {})
         };
       }).catch(() => {});
     };
@@ -510,7 +514,7 @@ export default Plugin.define({
         turnedAt
       };
       await goTo(remote, false);
-      flush();
+      flush(false, true);
       const agreed = await reader.agree({
         booxPath: b.booxPath,
         rev: c.rev,
@@ -1212,7 +1216,8 @@ export default Plugin.define({
         const s = current();
         return s && !isFinished({
           percent: value(),
-          updatedAt: s.updatedAt
+          updatedAt: s.updatedAt,
+          pulledAt: s.pulledAt
         }, s.boox) ? s : undefined;
       };
       const reopen = async () => {

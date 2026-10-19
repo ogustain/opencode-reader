@@ -226,10 +226,12 @@ export function contents(
 
 /**
  * A book read to the end: 100 % here, or finished on the Boox (100 %) with no
- * page turn here since the Boox last read it (re-reading here wins).
+ * page turn here since the Boox last read it (re-reading here wins). Applying
+ * the Boox position is no page turn: while `updatedAt` is still that of the
+ * last pull (`pulledAt`), the Boox's finish holds.
  */
-export function isFinished(local: { percent: number; updatedAt: number }, boox?: { percent: number; lastAccess: number }): boolean {
-  return local.percent >= 100 || (!!boox && boox.percent >= 100 && boox.lastAccess >= local.updatedAt)
+export function isFinished(local: { percent: number; updatedAt: number; pulledAt?: number }, boox?: { percent: number; lastAccess: number }): boolean {
+  return local.percent >= 100 || (!!boox && boox.percent >= 100 && (boox.lastAccess >= local.updatedAt || local.pulledAt === local.updatedAt))
 }
 
 /** "Boox: go to N %" when OpenCode is at least 1 % ahead of the last known Boox position. */

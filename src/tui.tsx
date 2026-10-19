@@ -62,6 +62,8 @@ type Saved = {
   /** Read to the end at this position, by a forward page turn. */
   finished?: boolean
   boox?: { percent: number; lastAccess: number; checkedAt: number }
+  /** `updatedAt` of the last Boox position applied here: equal while no page turned since. */
+  pulledAt?: number
   /**
    * Last sync: "sent", "failed", or "ask" (read on both sides: the reader
    * chooses). `turnedAt`: page-turn time of the last reading the cloud
@@ -169,7 +171,8 @@ export default Plugin.define({
 
     // Debounced save of the current position; flushed on close and unload.
     let saveTimer: ReturnType<typeof setTimeout> | undefined
-    const flush = (opened = false) => {
+    /** `pulled`: the position is a Boox position just applied. */
+    const flush = (opened = false, pulled = false) => {
       if (saveTimer) clearTimeout(saveTimer)
       saveTimer = undefined
       const b = book()
@@ -197,6 +200,7 @@ export default Plugin.define({
           percent: value,
           finished: done,
           ...savedTimes(previous, { turnedAt, opened, now }),
+          ...(pulled ? { pulledAt: turnedAt } : {}),
         }
       }).catch(() => {})
     }
@@ -430,7 +434,7 @@ export default Plugin.define({
       const turnedAt = Date.now()
       reading = { key: b.key, turnedAt }
       await goTo(remote, false)
-      flush()
+      flush(false, true)
       const agreed = (await reader.agree({ booxPath: b.booxPath, rev: c.rev, print: c.print, turnedAt }).catch(() => undefined)) as { ok?: boolean } | undefined
       if (agreed?.ok) {
         acked.set(b.key, turnedAt) // The cloud holds this reading (the Boox's, not a push: no "sent").
@@ -905,7 +909,7 @@ export default Plugin.define({
       // A finished book leaves the sidebar; opening an unfinished one brings it back.
       const shown = () => {
         const s = current()
-        return s && !isFinished({ percent: value(), updatedAt: s.updatedAt }, s.boox) ? s : undefined
+        return s && !isFinished({ percent: value(), updatedAt: s.updatedAt, pulledAt: s.pulledAt }, s.boox) ? s : undefined
       }
       const reopen = async () => {
         const s = current()
