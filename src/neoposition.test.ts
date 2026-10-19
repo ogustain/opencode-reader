@@ -113,6 +113,18 @@ test("an element, a stale xpath, the chapter start and unknown nodes all resolve
   assert.deepEqual(offsetToNeo(mapChapter("<html><body><img src='a.png'/></body></html>"), 0), { xpath: [], nodePosition: 0, textOffset: 0 })
 })
 
+test("a note reference in superscript aligns every character, both ways without drift", () => {
+  const note = '<sup class="c13"><span class="c14"><a href="../Text/n.html#sdfootnote11sym" id="sdfootnote11anc"><sup>11</sup></a></span></sup>'
+  const map = mapChapter(`<html><body><p><span>Dit Alexéi</span>${note}, puis au XIX<sup>e</sup> siècle.</p></body></html>`)
+  const flat = map.paragraphs[0].text
+  assert.equal(flat, "Dit Alexéi¹¹, puis au XIXᵉ siècle.")
+  assert.equal(map.count, flat.replace(/\s/g, "").length)
+  for (let offset = 0; offset < flat.length; offset++)
+    if (flat[offset] !== " ") assert.deepEqual(neoToOffset(map, offsetToNeo(map, offset)), { offset, exact: true }, flat[offset])
+  const at = offsetToNeo(map, flat.indexOf("¹"))
+  assert.deepEqual([map.nodes.find((n) => n.at === at.nodePosition)?.text, at.textOffset], ["11", 0])
+})
+
 test("decomposed Hangul and stacked marks align to the character", () => {
   const word = "가나다".normalize("NFD") // Six jamo, three syllables once composed.
   const stacked = "e\u0323\u0301" // NFC: ẹ + a combining acute (two units).

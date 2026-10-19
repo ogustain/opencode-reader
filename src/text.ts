@@ -47,6 +47,20 @@ const BLOCK = new Set([
 ])
 const DROP = ["head", "script", "style", "svg", "math", "noscript", "template"]
 
+/** Superscript and subscript forms, one UTF-16 unit per character so offsets are unchanged. */
+const RAISED: Record<string, string> = { sup: "0⁰1¹2²3³4⁴5⁵6⁶7⁷8⁸9⁹nⁿiⁱeᵉrʳdᵈoᵒ", sub: "0₀1₁2₂3₃4₄5₅6₆7₇8₈9₉" }
+const FORMS = Object.fromEntries(Object.entries(RAISED).map(([tag, pairs]) => [tag, new Map([...pairs.matchAll(/(.)(.)/gu)].map((m) => [m[1], m[2]]))]))
+const LOWER = new Map([...FORMS.sup, ...FORMS.sub].map(([a, b]) => [b, a]))
+/** Text with those forms back to their characters (same length): what the source said. */
+export function lowered(text: string): string {
+  return text.replace(/[⁰¹²³⁴-⁹ⁿⁱᵉʳᵈᵒ₀-₉]/g, (c) => LOWER.get(c) ?? c)
+}
+/** A text run inside `<sup>`/`<sub>` in their forms, or unchanged when one character (spaces aside) has none. */
+function raise(run: string, forms: Map<string, string>): string {
+  const chars = [...run]
+  return chars.every((c) => forms.has(c) || /\s/.test(c)) ? chars.map((c) => forms.get(c) ?? c).join("") : run
+}
+
 export function xhtmlToParagraphs(xhtml: string): Paragraph[] {
   let html = xhtml
     .replace(/\u0000/g, "")
@@ -60,6 +74,7 @@ export function xhtmlToParagraphs(xhtml: string): Paragraph[] {
   const paragraphs: Paragraph[] = []
   let current = ""
   let heading = 0
+  const depth = { sup: 0, sub: 0 }
   const flush = () => {
     const text = clean(current)
     if (text) paragraphs.push(heading > 0 ? { text, heading: true } : { text })
@@ -67,10 +82,12 @@ export function xhtmlToParagraphs(xhtml: string): Paragraph[] {
   }
   for (const m of html.matchAll(/<(\/?)([A-Za-z][\w:-]*)[^>]*?(\/?)>|([^<]+)/g)) {
     if (m[4] !== undefined) {
-      current += m[4]
+      const tag = depth.sup > 0 ? "sup" : depth.sub > 0 ? "sub" : undefined
+      current += tag ? raise(m[4], FORMS[tag]) : m[4]
       continue
     }
     const name = m[2].toLowerCase().replace(/^.*:/, "")
+    if ((name === "sup" || name === "sub") && !m[3]) depth[name] = Math.max(0, depth[name] + (m[1] ? -1 : 1))
     if (name === "br") {
       current += BREAK
       continue

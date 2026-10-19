@@ -24,7 +24,7 @@
  * Text nodes are aligned with the plugin's paragraphs (`xhtmlToParagraphs`) on
  * their non-space characters, so both directions are exact to the character.
  */
-import { chapterLength, decodeEntities, xhtmlToParagraphs, type Paragraph } from "./text.ts"
+import { chapterLength, decodeEntities, lowered, xhtmlToParagraphs, type Paragraph } from "./text.ts"
 
 // ---------------------------------------------------------------------------
 // The position string
@@ -225,7 +225,8 @@ const codePoint = (text: string, i: number) => String.fromCodePoint(text.codePoi
 export function mapChapter(xhtml: string, options: { maxSteps?: number } = {}): ChapterMap {
   if (xhtml.length > MAX_MAPPED_CHAPTER) throw new Error("chapter too large to locate positions in (over 16 MiB)")
   const paragraphs = xhtmlToParagraphs(xhtml)
-  const flat = paragraphs.map((p) => p.text).join("\n")
+  // Compared with sup/sub forms lowered on both sides (`text.ts` raises them one for one).
+  const flat = lowered(paragraphs.map((p) => p.text).join("\n"))
   const nodes = chapterNodes(xhtml)
   const skeleton: number[] = []
   for (let i = 0; i < flat.length; i++) if (!SPACE.test(flat[i])) skeleton.push(i)
@@ -239,6 +240,7 @@ export function mapChapter(xhtml: string, options: { maxSteps?: number } = {}): 
   let steps = 0
   /** Length of `text` when it is the plugin's text at skeleton index `k`, else 0. */
   const matches = (text: string) => {
+    text = lowered(text)
     if (!text || k + text.length > size) return 0
     for (let p = 0; p < text.length; p++) if (flat[skeleton[k + p]] !== text[p]) return 0
     return text.length
@@ -270,7 +272,7 @@ export function mapChapter(xhtml: string, options: { maxSteps?: number } = {}): 
         continue
       }
       // Out of step (markup the paragraph model treats differently): resync on the next few characters.
-      const probe = t.slice(i).normalize("NFC").replace(REMOVED_ALL, "").slice(0, 12)
+      const probe = lowered(t.slice(i).normalize("NFC")).replace(REMOVED_ALL, "").slice(0, 12)
       let found = -1
       for (let j = k; j < Math.min(size, k + 400) && probe.length >= 4; j++) {
         let ok = true
