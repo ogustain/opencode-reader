@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  createOnyx, EXPIRED_MESSAGE, MAX_BOOK_FILE, MAX_JSON, MAX_LIBRARY_JSON, OnyxError, ossBookKey, ossBucketOf, ossRequest, ossSignature, ossStringToSign, readMarks, readToken, saveBackup, tokenFingerprint, updateMark, writePrivateFile,
+  connectOnyx, createOnyx, disconnectOnyx, EXPIRED_MESSAGE, onyxServer, readSettings, MAX_BOOK_FILE, MAX_JSON, MAX_LIBRARY_JSON, OnyxError, ossBookKey, ossBucketOf, ossRequest, ossSignature, ossStringToSign, readMarks, readToken, saveBackup, tokenFingerprint, updateMark, writePrivateFile,
   type CloudDoc,
 } from "./onyx.ts"
 
@@ -503,4 +503,108 @@ test("the sync record (base and attempt) survives a restart, and an unreadable o
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/** A connect setup: a client whose region follows the settings file, as the plugin's does. */
+function connectSetup(token: string | null = null) {
+  const paths = files(token)
+  const settingsFile = join(paths.tokenFile, "..", "settings.json")
+  // The check buys a session it does not keep: the next request buys another.
+  const cloud = fakeCloud({ sessions: ["checked", "s1"], valid: new Set(["s1"]) })
+  const onyx = createOnyx({ ...paths, server: () => onyxServer(undefined, settingsFile), fetch: cloud.fetch, now: () => NOW })
+  return { ...paths, settingsFile, cloud, onyx }
+}
+
+test("connecting checks the pasted token first, then saves it 0600 with the region, and starts a new session", async () => {
+  const setup = connectSetup("old-token")
+  writeFileSync(setup.sessionFile, JSON.stringify({ cookie_name: "SyncGatewaySession", session_id: "old", expires: LATER, server: "https://eurcb.boox.com/neocloud/", token_sha: tokenFingerprint("old-token") }))
+  const result = await connectOnyx(setup.onyx, { token: ` "${TOKEN}"\n`, server: "us" }, setup)
+  assert.deepEqual(result, { ok: true })
+  // Checked with the pasted token on the chosen region, before anything was saved.
+  assert.deepEqual(setup.cloud.calls.map((c) => [c.url, c.auth]), [["https://push.boox.com/api/1/users/syncToken", `Bearer ${TOKEN}`]])
+  assert.equal(readToken(setup.tokenFile), TOKEN)
+  assert.equal(statSync(setup.tokenFile).mode & 0o777, 0o600)
+  assert.deepEqual(readSettings(setup.settingsFile), { server: "us" })
+  assert.equal(statSync(setup.settingsFile).mode & 0o777, 0o600)
+  assert.equal(existsSync(setup.sessionFile), false)
+  // The client uses the new token and region at once, without a restart.
+  setup.cloud.calls.length = 0
+  await setup.onyx.library()
+  assert.deepEqual(setup.cloud.calls.map((c) => new URL(c.url).host), ["push.boox.com", "cb.boox.com", "cb.boox.com"])
+  assert.equal(setup.cloud.calls[0].auth, `Bearer ${TOKEN}`)
+})
+
+test("a refused token is never saved and the existing one is kept; errors never carry it", async () => {
+  const paths = files("old-token")
+  const settingsFile = join(paths.tokenFile, "..", "settings.json")
+  const refused = fakeCloud({ syncStatus: 401 })
+  const onyx = createOnyx({ ...paths, server: () => onyxServer(undefined, settingsFile), fetch: refused.fetch, now: () => NOW })
+  const result = await connectOnyx(onyx, { token: TOKEN, server: "eur" }, { ...paths, settingsFile })
+  assert.deepEqual(result, { ok: false, error: "the Onyx cloud refused this token" })
+  assert.equal(readFileSync(paths.tokenFile, "utf8"), "old-token")
+  assert.equal(existsSync(settingsFile), false)
+
+  const offline = createOnyx({ ...paths, fetch: (async () => { throw new TypeError(TOKEN) }) as typeof fetch, now: () => NOW })
+  const down = await connectOnyx(offline, { token: TOKEN, server: "eur" }, { ...paths, settingsFile })
+  assert.ok(!down.ok && down.error.startsWith("offline") && !down.error.includes(TOKEN))
+  assert.equal(readFileSync(paths.tokenFile, "utf8"), "old-token")
+
+  for (const input of [{ token: "  ", server: "eur" }, { token: TOKEN, server: "asia" }]) {
+    const bad = await connectOnyx(onyx, input, { ...paths, settingsFile })
+    assert.ok(!bad.ok && !bad.error.includes(TOKEN))
+  }
+  assert.equal(refused.calls.length, 1)
+})
+
+test("connecting refuses a token file that is a symbolic link, before any request", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "onyx-"))
+  const target = join(dir, "elsewhere")
+  writeFileSync(target, "old-token")
+  const tokenFile = join(dir, "token")
+  symlinkSync(target, tokenFile)
+  const cloud = fakeCloud()
+  const onyx = createOnyx({ tokenFile, sessionFile: join(dir, "session"), fetch: cloud.fetch, now: () => NOW })
+  const result = await connectOnyx(onyx, { token: TOKEN, server: "eur" }, { tokenFile, settingsFile: join(dir, "settings.json") })
+  assert.ok(!result.ok && /symbolic link/.test(result.error))
+  assert.equal(cloud.calls.length, 0)
+  assert.ok(lstatSync(tokenFile).isSymbolicLink())
+  assert.equal(readFileSync(target, "utf8"), "old-token")
+})
+
+test("disconnecting deletes the token and the session, and keeps backups, sync records and settings", async () => {
+  const setup = connectSetup()
+  assert.deepEqual(await connectOnyx(setup.onyx, { token: TOKEN, server: "eur" }, setup), { ok: true })
+  await setup.onyx.library()
+  assert.ok(existsSync(setup.sessionFile))
+  const dir = join(setup.tokenFile, "..")
+  saveBackup(join(dir, "onyx-backups.json"), { _id: "u1#b1", _rev: "1-r", modeType: 4 }, 1)
+  updateMark(join(dir, "onyx-sync.json"), "u1#b1", () => ({}))
+  writePrivateFile(join(dir, "books", "a.epub"), "PK")
+  assert.deepEqual(disconnectOnyx(setup.onyx, setup), { ok: true })
+  assert.equal(existsSync(setup.tokenFile), false)
+  assert.equal(existsSync(setup.sessionFile), false)
+  assert.equal(setup.onyx.configured(), false)
+  await assert.rejects(setup.onyx.library(), (e: OnyxError) => e.state === "off")
+  for (const kept of ["onyx-backups.json", "onyx-sync.json", "settings.json", join("books", "a.epub")]) assert.ok(existsSync(join(dir, kept)), kept)
+})
+
+test("the server option wins over the region saved in settings.json", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "onyx-"))
+  const settingsFile = join(dir, "settings.json")
+  assert.deepEqual(readSettings(settingsFile), {})
+  assert.equal(onyxServer(undefined, settingsFile), undefined)
+  writePrivateFile(settingsFile, JSON.stringify({ server: "us" }))
+  assert.equal(onyxServer(undefined, settingsFile), "us")
+  assert.equal(onyxServer("eur", settingsFile), "eur")
+  writeFileSync(settingsFile, "{ not json")
+  assert.equal(onyxServer(undefined, settingsFile), undefined)
+
+  writePrivateFile(settingsFile, JSON.stringify({ server: "us" }))
+  const hosts = async (option: unknown) => {
+    const cloud = fakeCloud()
+    await createOnyx({ ...files(), server: () => onyxServer(option, settingsFile), fetch: cloud.fetch, now: () => NOW }).userId()
+    return new URL(cloud.calls[0].url).host
+  }
+  assert.equal(await hosts(undefined), "push.boox.com")
+  assert.equal(await hosts("eur"), "eur.boox.com")
 })

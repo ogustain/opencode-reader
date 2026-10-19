@@ -12,9 +12,9 @@
  *
  * Options: `dir` (local books), `dataDir` (cache, token, session, backups;
  * default `$XDG_DATA_HOME/opencode-reader`), `adb` (adb binary), `serial`
- * (device serial when several are attached), `server` ("eur" or "us"),
- * `tokenFile` (Onyx token), `pushIdleMinutes` (push after this long without a
- * page turn).
+ * (device serial when several are attached), `server` ("eur" or "us"; else
+ * the region saved by `connect` in `<dataDir>/settings.json`), `tokenFile`
+ * (Onyx token), `pushIdleMinutes` (push after this long without a page turn).
  */
 import { Plugin } from "@opencode/plugin"
 import { basename, resolve } from "node:path"
@@ -27,12 +27,12 @@ import type { ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
 import { createFetcher, createLock, liveCopies, type CacheManifest } from "./sources.ts"
 import {
-  createOnyx, defaultBackupFile, defaultSessionFile, defaultSyncFile, defaultTokenFile, OnyxError, readMarks, saveBackup, updateMark, type CloudDoc,
-  type OnyxState,
+  connectOnyx, createOnyx, defaultBackupFile, defaultSessionFile, defaultSettingsFile, defaultSyncFile, defaultTokenFile, disconnectOnyx, OnyxError,
+  onyxServer, readMarks, saveBackup, updateMark, type CloudDoc, type OnyxState,
 } from "./onyx.ts"
 import {
-  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type NoteResult, type OpenResult, type PullResult,
-  type PushResult,
+  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type ConnectResult, type FetchResult, type NoteResult, type OpenResult,
+  type PullResult, type PushResult,
 } from "./rpc.ts"
 import {
   cloudLibrary, pullDoc, pushDoc, toLocal, toNeo, validMark, withBase, withPushedProgress, type CloudLibrary, type DocIo, type LocalReading, type NeoRef,
@@ -62,10 +62,12 @@ export default Plugin.define({
     const cacheDir = defaultCacheDir(dataDir)
     const roots = [dir, cacheDir]
     const adb = createAdb({ bin: ctx.options.adb, serial: ctx.options.serial })
+    const tokenFile = typeof ctx.options.tokenFile === "string" && ctx.options.tokenFile ? resolve(expandHome(ctx.options.tokenFile)) : defaultTokenFile(dataDir)
+    // The region: the `server` option, else the one saved when connecting (read at each request).
+    const settingsFile = defaultSettingsFile(dataDir)
     const onyx = createOnyx({
-      server: ctx.options.server,
-      tokenFile:
-        typeof ctx.options.tokenFile === "string" && ctx.options.tokenFile ? resolve(expandHome(ctx.options.tokenFile)) : defaultTokenFile(dataDir),
+      server: () => onyxServer(ctx.options.server, settingsFile),
+      tokenFile,
       sessionFile: defaultSessionFile(dataDir),
     })
     const idle = Number(ctx.options.pushIdleMinutes)
@@ -165,6 +167,12 @@ export default Plugin.define({
         }
         return cloud
       })().finally(() => (cloudAsking = undefined)))
+    /** Another account (or none): its library is read afresh at the next use. */
+    const forgetCloud = () => {
+      lastCloud = 0
+      cloud = { state: "off", message: "Onyx cloud not checked yet", collections: [], books: [] }
+      void save("cloud", cloud)
+    }
     /** Doc id of the cloud book at a Boox path; the library is fetched again when it is not known. */
     const cloudBook = async (booxPath: string) => {
       const find = () => cloud.books.find((b) => b.path === booxPath)
@@ -370,6 +378,20 @@ export default Plugin.define({
         } catch (error) {
           return { added: [], skipped: [{ name: basename(source), reason: message(error) }] }
         }
+      },
+      connect: async (input): Promise<ConnectResult> => {
+        const { token, server } = (input ?? {}) as { token?: unknown; server?: unknown }
+        // The `server` option wins over the region chosen: the token is checked where it will be used.
+        const option = ctx.options.server
+        const region = option === undefined ? server : option === "us" ? "us" : "eur"
+        const result = await connectOnyx(onyx, { token, server: region }, { tokenFile, settingsFile })
+        if (result.ok) forgetCloud()
+        return result
+      },
+      disconnect: async () => {
+        const result = disconnectOnyx(onyx, { tokenFile })
+        forgetCloud()
+        return result
       },
     })
 

@@ -17,8 +17,9 @@
  * Only GET and PUT exist here, and PUT only accepts book docs (modeType 4).
  */
 import { createHash, createHmac, randomBytes } from "node:crypto"
-import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs"
+import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
+import { cleanToken } from "./input.ts"
 import { defaultDataDir } from "./paths.ts"
 import { EXPIRED_MESSAGE, type CloudMark } from "./sync.ts"
 
@@ -63,6 +64,7 @@ export type CloudDoc = Record<string, unknown> & { _id: string; _rev?: string; m
 type Fetch = typeof fetch
 
 export type OnyxOptions = {
+  /** "eur" (default) or "us", or a function giving it, read at each request (a new region needs no restart). */
   server?: unknown
   tokenFile?: string
   sessionFile?: string
@@ -88,6 +90,10 @@ export type Onyx = {
    * byte count; "missing" when the cloud has no file.
    */
   downloadBook(doc: CloudDoc, dest: string, size?: number): Promise<number>
+  /** Buys a session with `token` on `server` (not the token file), and forgets it: throws as a session request does. */
+  verify(token: string, server: OnyxServer): Promise<void>
+  /** Forgets the session (memory and file), the storage credentials and bucket: the next request starts afresh. */
+  reset(): void
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +318,8 @@ export function readToken(file: string): string | undefined {
 export const tokenFingerprint = (token: string) => createHash("sha256").update(token).digest("hex").slice(0, 16)
 
 export function createOnyx(options: OnyxOptions = {}): Onyx {
-  const endpoints = ENDPOINTS[options.server === "us" ? "us" : "eur"]
+  const server = options.server
+  const endpoints = () => ENDPOINTS[(typeof server === "function" ? server() : server) === "us" ? "us" : "eur"]
   const tokenFile = options.tokenFile ?? defaultTokenFile()
   const sessionFile = options.sessionFile ?? defaultSessionFile()
   const fetcher: Fetch = options.fetch ?? fetch
@@ -367,7 +374,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     !!s &&
     typeof s.session_id === "string" &&
     typeof s.cookie_name === "string" &&
-    s.server === endpoints.gateway &&
+    s.server === endpoints().gateway &&
     s.token_sha === tokenFingerprint(token) &&
     Date.parse(s.expires) - now() > MARGIN_MS
   /** Forgets the session in memory and on disk. */
@@ -389,10 +396,9 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     }
   }
 
-  const newSession = async (): Promise<Session> => {
-    const token = readToken(tokenFile)
+  const newSession = async (token = readToken(tokenFile), ends = endpoints()): Promise<Session> => {
     if (!token) throw new OnyxError("off", "Onyx cloud not configured (see README)")
-    const response = await request(`${endpoints.api}users/syncToken`, { headers: { Authorization: `Bearer ${token}` } })
+    const response = await request(`${ends.api}users/syncToken`, { headers: { Authorization: `Bearer ${token}` } })
     if (response.status === 401 || response.status === 403) throw new OnyxError("expired", EXPIRED_MESSAGE)
     if (!response.ok) throw new OnyxError("error", `Onyx cloud: HTTP ${response.status}`)
     const body = (await json(response)) as { result_code?: number; data?: Partial<Session> }
@@ -404,7 +410,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       session_id: data.session_id,
       expires: String(data.expires ?? ""),
       channels: data.channels,
-      server: endpoints.gateway,
+      server: ends.gateway,
       token_sha: tokenFingerprint(token),
     }
   }
@@ -434,7 +440,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     for (let attempt = 0; ; attempt++) {
       const s = await current()
       const headers = { ...(init.headers as Record<string, string> | undefined), Cookie: `${s.cookie_name}=${s.session_id}` }
-      const response = await request(endpoints.gateway + path, { ...init, headers }, timeout)
+      const response = await request(endpoints().gateway + path, { ...init, headers }, timeout)
       if (response.status !== 401 || attempt > 0) return response
       session = undefined
       store(await newSession())
@@ -462,7 +468,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
   const api = async (path: string): Promise<unknown> => {
     const token = readToken(tokenFile)
     if (!token) throw new OnyxError("off", "Onyx cloud not configured (see README)")
-    const response = await request(`${endpoints.api}${path}`, { headers: { Authorization: `Bearer ${token}` } })
+    const response = await request(`${endpoints().api}${path}`, { headers: { Authorization: `Bearer ${token}` } })
     if (response.status === 401 || response.status === 403) throw new OnyxError("expired", EXPIRED_MESSAGE)
     if (!response.ok) throw new OnyxError("error", `Onyx cloud: HTTP ${response.status}`)
     const body = (await json(response)) as { result_code?: number; data?: unknown }
@@ -573,6 +579,14 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     },
     userId,
     downloadBook,
+    async verify(token, server) {
+      await newSession(token, ENDPOINTS[server])
+    },
+    reset() {
+      forget()
+      sts = undefined
+      bucket = undefined
+    },
     async library() {
       const uid = await userId()
       const query = `filter=sync_gateway/bychannel&channels=${encodeURIComponent(`${uid}-READER_LIBRARY`)}&include_docs=true`
@@ -600,4 +614,78 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       return typeof body?.rev === "string" ? body.rev : ""
     },
   }
+}
+
+// ---------------------------------------------------------------------------
+// Connecting a BOOX from the TUI
+
+export const defaultSettingsFile = (dataDir = defaultDataDir()) => join(dataDir, "settings.json")
+
+/** The plugin's saved settings (the region chosen when connecting); empty when missing or unreadable. */
+export function readSettings(file: string): { server?: OnyxServer } {
+  try {
+    const value = JSON.parse(readPrivateFile(file) ?? "{}") as { server?: unknown }
+    return value?.server === "eur" || value?.server === "us" ? { server: value.server } : {}
+  } catch {
+    return {}
+  }
+}
+
+/** The region: the `server` option when set, else the saved one (eur when neither). */
+export const onyxServer = (option: unknown, settingsFile: string): unknown => option ?? readSettings(settingsFile).server
+
+/** A token file we may replace: missing, or a plain file (never a symbolic link). */
+function replaceable(file: string): boolean {
+  try {
+    return lstatSync(file).isFile()
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+  }
+}
+
+/**
+ * Checks `token` with the Onyx cloud of `server`, then saves it (0600, in one
+ * step) and the region, and forgets the old session. A refused token is never
+ * written, and the errors never carry it.
+ */
+export async function connectOnyx(
+  onyx: Onyx,
+  input: { token: unknown; server: unknown },
+  files: { tokenFile: string; settingsFile: string },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const token = cleanToken(input.token)
+  const server = input.server === "eur" || input.server === "us" ? input.server : undefined
+  if (!token) return { ok: false, error: "no token" }
+  if (!server) return { ok: false, error: "unknown region" }
+  if (!replaceable(files.tokenFile)) return { ok: false, error: `refused: ${basename(files.tokenFile)} is a symbolic link or not a file` }
+  try {
+    await onyx.verify(token, server)
+  } catch (error) {
+    // Messages of the client's errors never carry the token.
+    if (error instanceof OnyxError && error.state === "offline") return { ok: false, error: "offline: the Onyx cloud is unreachable" }
+    if (error instanceof OnyxError && error.state === "error") return { ok: false, error: error.message }
+    return { ok: false, error: "the Onyx cloud refused this token" }
+  }
+  try {
+    if (!replaceable(files.tokenFile)) return { ok: false, error: `refused: ${basename(files.tokenFile)} is a symbolic link or not a file` }
+    writePrivateFile(files.tokenFile, `${token}\n`)
+    writePrivateFile(files.settingsFile, JSON.stringify({ ...readSettings(files.settingsFile), server }))
+  } catch (error) {
+    return { ok: false, error: `cannot save the token (${(error as NodeJS.ErrnoException).code ?? "error"})` }
+  } finally {
+    onyx.reset()
+  }
+  return { ok: true }
+}
+
+/** Deletes the token and the sync session; backups, sync records, settings and books stay. */
+export function disconnectOnyx(onyx: Onyx, files: { tokenFile: string }): { ok: true } | { ok: false; error: string } {
+  try {
+    rmSync(files.tokenFile, { force: true })
+  } catch (error) {
+    return { ok: false, error: `cannot delete the token (${(error as NodeJS.ErrnoException).code ?? "error"})` }
+  } finally {
+    onyx.reset()
+  }
+  return { ok: true }
 }

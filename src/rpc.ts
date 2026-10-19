@@ -33,6 +33,8 @@ export type ChapterResult = { ok: true; paragraphs: Paragraph[] } | { ok: false;
 export type NoteResult = { ok: true; text: string } | { ok: false; error: string }
 
 export type SyncSettings = { cloud: boolean; pushIdleMinutes: number }
+/** `error` never carries the token. */
+export type ConnectResult = { ok: true } | { ok: false; error: string }
 /** The Onyx cloud library (last known when `state` is not "ok"). */
 export type CloudListing = {
   state: OnyxState
@@ -98,6 +100,10 @@ export const ReaderRpc = Rpc.define({
     push: { input: object, output: object },
     /** { path } → AddResult (an EPUB file, or a folder's EPUBs, copied into `dir`) */
     add: { input: object, output: object },
+    /** { token, server: "eur" | "us" } → ConnectResult (the token is checked with the Onyx cloud before it is saved) */
+    connect: { input: object, output: object },
+    /** {} → ConnectResult (deletes the token and the sync session; backups, sync records and books stay) */
+    disconnect: { input: object, output: object },
   },
   events: {},
 })
