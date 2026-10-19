@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
-import { bufferSource, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
+import { bufferSource, decodeXml, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
 import { bookKey, buildIndex, cacheFile, neoRefs, readChapter, readChapterMap, readMeta, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
@@ -291,4 +291,42 @@ test("reads are confined to the folders once symbolic links are resolved", async
   await symlink(books, join(base, "alias"))
   assert.ok(within(join(base, "alias", "in.epub"), [join(base, "alias")]))
   assert.ok(within(join(books, "in.epub"), [join(base, "alias")]))
+})
+
+test("documents are decoded by byte order mark or XML declaration: UTF-8 and UTF-16 only", async () => {
+  const text = '<?xml version="1.0" encoding="UTF-16"?><html><body><p>Élan — 東京</p></body></html>'
+  const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")])
+  const be = Buffer.from(le)
+  be.swap16()
+  assert.equal(decodeXml(le, "a.xhtml"), text)
+  assert.equal(decodeXml(be, "a.xhtml"), text)
+  assert.equal(decodeXml(Buffer.from(text, "utf16le"), "a.xhtml"), text) // No mark.
+  // UTF-8 decodes exactly as before, mark included (positions count it).
+  const utf8 = Buffer.from('\ufeff<?xml version="1.0" encoding="utf-8"?><p>Élan</p>', "utf8")
+  assert.equal(decodeXml(utf8, "a.xhtml"), utf8.toString("utf8"))
+  assert.equal(decodeXml(Buffer.from("<p>Élan</p>"), "a.xhtml"), "<p>Élan</p>")
+  assert.throws(() => decodeXml(Buffer.from('<?xml version="1.0" encoding="ISO-8859-1"?><p>\xe9</p>', "latin1"), "OEBPS/a.xhtml"), {
+    name: "Error",
+    message: 'OEBPS/a.xhtml: unsupported text encoding "iso-8859-1" (only UTF-8 and UTF-16)',
+  })
+
+  // A UTF-16LE chapter in a book reads like any other.
+  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  const path = join(dir, "utf16.epub")
+  const chapter16 = '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Un</h1><p>Première page — 東京.</p></body></html>'
+  const opf16 = `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Seize</dc:title></metadata>
+    <manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>`
+  await writeFile(
+    path,
+    zip([
+      { name: "mimetype", data: "application/epub+zip", store: true },
+      { name: "META-INF/container.xml", data: container },
+      { name: "OEBPS/content.opf", data: opf16 },
+      { name: "OEBPS/c1.xhtml", data: Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(chapter16, "utf16le")]) },
+    ]),
+  )
+  assert.equal(readMeta(path).title, "Seize")
+  assert.deepEqual(readChapter(path, 0), [{ text: "Un", heading: true }, { text: "Première page — 東京." }])
+  assert.equal(buildIndex(path).chapters[0].title, "Un")
+  assert.deepEqual(readChapterMap(path, 0).paragraphs, readChapter(path, 0))
 })

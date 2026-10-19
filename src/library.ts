@@ -7,7 +7,7 @@ import { createHash } from "node:crypto"
 import { readdirSync, realpathSync, statSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve, sep } from "node:path"
-import { fileSource, openZip, readPackage, type Zip } from "./epub.ts"
+import { decodeXml, fileSource, openZip, readPackage, type Zip } from "./epub.ts"
 import { mapChapter, type ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
 import type { NeoRef } from "./sync.ts"
@@ -105,7 +105,7 @@ export function buildIndex(path: string): BookIndex {
     const chapters = pkg.spine.map((doc) => {
       const known = seen.get(doc)
       if (known) return known
-      const paragraphs = xhtmlToParagraphs(zip.read(doc).toString("utf8"))
+      const paragraphs = xhtmlToParagraphs(decodeXml(zip.read(doc), doc))
       const heading = pkg.toc[doc] ?? paragraphs.find((p) => p.heading)?.text.replace(/\s+/g, " ")
       const chapter = { ...(heading ? { title: heading.slice(0, 80) } : {}), chars: paragraphs.length ? chapterLength(paragraphs) : 0 }
       seen.set(doc, chapter)
@@ -135,7 +135,7 @@ export function readChapterMap(path: string, spine: number): ChapterMap {
   return withZip(path, (zip) => {
     const doc = readPackage(zip, fallback(path)).spine[spine]
     if (!doc) throw new Error(`no chapter ${spine}`)
-    return mapChapter(zip.read(doc).toString("utf8"))
+    return mapChapter(decodeXml(zip.read(doc), doc))
   })
 }
 
@@ -144,6 +144,6 @@ export function readChapter(path: string, spine: number): Paragraph[] {
     const pkg = readPackage(zip, fallback(path))
     const doc = pkg.spine[spine]
     if (!doc) throw new Error(`no chapter ${spine}`)
-    return xhtmlToParagraphs(zip.read(doc).toString("utf8"))
+    return xhtmlToParagraphs(decodeXml(zip.read(doc), doc))
   })
 }

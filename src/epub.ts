@@ -169,11 +169,29 @@ function resolveHref(base: string, href: string): string {
   return posix.normalize(posix.join(base, path)).replace(/^\.\//, "")
 }
 
+/**
+ * Text of an XML or XHTML document, by its byte order mark, else the
+ * encoding of its XML declaration. UTF-8 (the default) decodes exactly as
+ * before; UTF-16 LE/BE through TextDecoder; any other encoding is refused.
+ */
+export function decodeXml(bytes: Buffer, name: string): string {
+  const [a, b, c, d] = bytes
+  if (a === 0xff && b === 0xfe) return new TextDecoder("utf-16le").decode(bytes)
+  if (a === 0xfe && b === 0xff) return new TextDecoder("utf-16be").decode(bytes)
+  // No mark: `<?` in UTF-16 (XML 1.0, appendix F).
+  if (a === 0x3c && b === 0 && c === 0x3f && d === 0) return new TextDecoder("utf-16le").decode(bytes)
+  if (a === 0 && b === 0x3c && c === 0 && d === 0x3f) return new TextDecoder("utf-16be").decode(bytes)
+  const head = bytes.subarray(0, 256).toString("latin1")
+  const declared = /^(?:\u00ef\u00bb\u00bf)?\s*<\?xml\b[^>]*?\bencoding\s*=\s*["']([^"']*)["']/.exec(head)?.[1].trim().toLowerCase()
+  if (!declared || declared === "utf-8" || declared === "utf8" || declared === "us-ascii" || declared === "ascii") return bytes.toString("utf8")
+  throw new EpubError(`${name}: unsupported text encoding "${declared.slice(0, 40)}" (only UTF-8 and UTF-16)`)
+}
+
 /** DRM check: Adobe ADEPT rights, or encrypted entries other than obfuscated fonts. */
 function assertNotProtected(zip: Zip) {
   if (zip.has("META-INF/rights.xml")) throw new EpubError("protected book (DRM), not supported")
   if (!zip.has("META-INF/encryption.xml")) return
-  const xml = zip.read("META-INF/encryption.xml").toString("utf8")
+  const xml = decodeXml(zip.read("META-INF/encryption.xml"), "META-INF/encryption.xml")
   const blocks = xml.split(/<(?:[\w-]+:)?EncryptedData\b/).slice(1)
   for (const block of blocks) {
     const algorithm = tags(block, "EncryptionMethod")[0]?.Algorithm ?? ""
@@ -187,11 +205,11 @@ function assertNotProtected(zip: Zip) {
 export function readPackage(zip: Zip, fallbackTitle = "Untitled"): Package {
   if (!zip.has("META-INF/container.xml")) throw new EpubError("not an EPUB (no META-INF/container.xml)")
   assertNotProtected(zip)
-  const container = zip.read("META-INF/container.xml").toString("utf8")
+  const container = decodeXml(zip.read("META-INF/container.xml"), "META-INF/container.xml")
   const rootfile = tags(container, "rootfile").find((r) => r["full-path"])
   if (!rootfile) throw new EpubError("not an EPUB (no rootfile in container.xml)")
   const opfPath = rootfile["full-path"]
-  const opf = zip.read(opfPath).toString("utf8")
+  const opf = decodeXml(zip.read(opfPath), opfPath)
   const base = posix.dirname(opfPath) === "." ? "" : posix.dirname(opfPath)
 
   const manifest = new Map<string, { href: string; type: string; properties: string }>()
@@ -213,8 +231,8 @@ export function readPackage(zip: Zip, fallbackTitle = "Untitled"): Package {
   const ncx = (ncxId && manifest.get(ncxId)) || [...manifest.values()].find((item) => item.type === "application/x-dtbncx+xml")
   let toc: Record<string, string> = {}
   try {
-    if (nav && zip.has(nav.href)) toc = navTitles(zip.read(nav.href).toString("utf8"), posix.dirname(nav.href))
-    if (Object.keys(toc).length === 0 && ncx && zip.has(ncx.href)) toc = ncxTitles(zip.read(ncx.href).toString("utf8"), posix.dirname(ncx.href))
+    if (nav && zip.has(nav.href)) toc = navTitles(decodeXml(zip.read(nav.href), nav.href), posix.dirname(nav.href))
+    if (Object.keys(toc).length === 0 && ncx && zip.has(ncx.href)) toc = ncxTitles(decodeXml(zip.read(ncx.href), ncx.href), posix.dirname(ncx.href))
   } catch {
     toc = {} // Chapter titles are optional.
   }

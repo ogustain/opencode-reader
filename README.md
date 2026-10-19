@@ -207,7 +207,8 @@ Protocol details for contributors are in
   BOOX since the sync was turned on) are not sent; the "go to N %" hint is
   shown instead.
 - EPUB only, without DRM (Adobe ADEPT or encrypted chapters are refused;
-  obfuscated fonts are fine). ZIP64 archives are not supported.
+  obfuscated fonts are fine). ZIP64 archives are not supported. Documents
+  must be UTF-8 or UTF-16; other encodings are refused.
 - Text only: images, tables and styling are dropped. Wide (CJK) characters
   may overflow the panel width and are not justified correctly.
 - Tested with NeoReader on one BOOX model (Android 13). Other models and
