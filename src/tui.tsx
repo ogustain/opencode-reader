@@ -2,7 +2,7 @@
  * TUI half of the opencode-reader plugin.
  *
  * `/read` picks a book from the server's library and opens it in the session
- * panel; `/books` browses the Boox library (the Onyx cloud's collections, or
+ * panel, or adds books to it ("Add books…", `/read <path>`); `/books` browses the Boox library (the Onyx cloud's collections, or
  * the device over ADB without a cloud token). Positions are `{ spine, offset }`,
  * saved per book (debounced) in durable storage. Only the current chapter is
  * held, and only the visible lines are rendered.
@@ -18,13 +18,14 @@
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
+import { addSummary, cleanPath, commandArgument } from "./input"
 import type { OnyxState } from "./onyx"
 import {
   booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextScreen, notesBetween, previousScreen,
   progressOf, savedFinish, savedTimes, screenAt, turnForward, type Display, type Position,
 } from "./paginate"
 import {
-  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type NoteResult, type OpenResult,
+  ReaderRpc, type AddResult, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type NoteResult, type OpenResult,
   type PullResult, type PushResult, type SyncSettings,
 } from "./rpc"
 import {
@@ -511,28 +512,71 @@ export default Plugin.define({
       return listing
     }
 
-    const readCommand = async () => {
+    /**
+     * Copies an EPUB file or a folder's EPUBs into the library (`path`, else
+     * asked), says what happened, and opens the book when there is one: the
+     * one added, or its copy already there.
+     */
+    const addCommand = async (path?: string) => {
+      if (path === undefined) {
+        setDialogOpen(true)
+        path = await context.ui.dialog
+          .prompt({
+            title: "Add books",
+            description: "Path of an EPUB file or a folder (you can drag it into the terminal)",
+            placeholder: "~/Downloads/book.epub",
+          })
+          .finally(() => setDialogOpen(false))
+      }
+      const source = cleanPath(path ?? "")
+      if (!source) return
+      const result = (await reader.add({ path: source }).catch(() => undefined)) as AddResult | undefined
+      if (!result) return toast("Reader server plugin unavailable.", "error")
+      const summary = addSummary(result)
+      const refused = result.skipped.some((s) => s.reason !== "already there")
+      toast(summary || `No EPUB in ${context.ui.format.path(source)}`, !summary ? "warning" : refused ? "warning" : "success")
+      const one = result.added.length === 1 ? result.added[0] : result.added.length === 0 && result.skipped.length === 1 ? result.skipped[0].existing : undefined
+      if (one && (await loadBook(one))) openPanel()
+    }
+
+    const readCommand = async (input?: string) => {
+      const argument = commandArgument(input, "read")
+      if (argument) return addCommand(argument)
       const library = (await reader.library({}).catch(() => undefined)) as LibraryResult | undefined
       if (!library) return toast("Reader server plugin unavailable.", "error")
-      if (library.books.length === 0) return toast(`No EPUB in ${context.ui.format.path(library.dir)}. Use /books for the Boox.`, "warning")
       const recency = (b: BookEntry) => Math.max(store.books[b.key]?.updatedAt ?? 0, store.books[b.key]?.openedAt ?? 0)
       const books = [...library.books].sort((a, b) => recency(b) - recency(a) || a.title.localeCompare(b.title))
-      const choice = await context.ui.dialog.select<BookEntry>({
-        title: "Read",
+      type Choice = { add: true } | { book: BookEntry }
+      const values = books.map((b) => ({ book: b }))
+      const empty = books.length === 0
+      const choice = await context.ui.dialog.select<Choice>({
+        title: empty ? "Read: no books yet" : "Read",
         placeholder: "Search books",
-        current: books.find((b) => b.key === store.current),
-        options: books.map((b) => {
-          const saved = store.books[b.key]
-          return {
-            title: b.title,
-            value: b,
-            description: [b.author, saved ? pct(saved.percent) : undefined].filter(Boolean).join(" · ") || undefined,
-            category: saved ? "Recent" : b.source === "boox" ? "From the Boox" : "Books",
-          }
-        }),
+        current: values.find((v) => v.book.key === store.current),
+        options: [
+          {
+            title: "Add books…",
+            value: { add: true },
+            description: empty
+              ? `No books yet. Add some, or put EPUB files in ${context.ui.format.path(library.dir)}`
+              : `An EPUB file or a folder, copied into ${context.ui.format.path(library.dir)}`,
+            category: "Library",
+          },
+          ...values.map((value) => {
+            const b = value.book
+            const saved = store.books[b.key]
+            return {
+              title: b.title,
+              value,
+              description: [b.author, saved ? pct(saved.percent) : undefined].filter(Boolean).join(" · ") || undefined,
+              category: saved ? "Recent" : b.source === "boox" ? "From the Boox" : "Books",
+            }
+          }),
+        ],
       })
       if (!choice) return
-      if (await loadBook(choice)) openPanel()
+      if ("add" in choice) return addCommand()
+      if (await loadBook(choice.book)) openPanel()
     }
 
     /** `/books` without the cloud: the device's library over ADB, with the "go to N %" hint for the way back. */
@@ -692,8 +736,8 @@ export default Plugin.define({
           title: "Reader: read a book",
           group: "Reader",
           palette: true,
-          slash: { name: "read" },
-          run: readCommand,
+          slash: { name: "read", arguments: true },
+          run: (input) => readCommand(input),
         },
         {
           id: "opencode-reader.books",
