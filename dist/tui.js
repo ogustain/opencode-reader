@@ -11,7 +11,7 @@ import { createElement as _$createElement } from "@opentui/solid";
  * TUI half of the opencode-reader plugin.
  *
  * `/read` picks a book from the server's library and opens it in the session
- * panel, or adds books to it ("Add books…", `/read <path>`); `/books` browses
+ * panel, or adds books to it ("Add books…", `/add [path]`); `/books` browses
  * the Boox library (the Onyx cloud's collections, or the device over ADB
  * without a cloud token; "Connect a BOOX…" sets the token when there is
  * neither). Positions are `{ spine, offset }`, saved per book (debounced) in
@@ -651,9 +651,7 @@ export default Plugin.define({
       const one = result.added.length === 1 ? result.added[0] : result.added.length === 0 && result.skipped.length === 1 ? result.skipped[0].existing : undefined;
       if (one && (await loadBook(one))) openPanel();
     };
-    const readCommand = async input => {
-      const argument = commandArgument(input, "read");
-      if (argument) return addCommand(argument);
+    const readCommand = async () => {
       const library = await reader.library({}).catch(() => undefined);
       if (!library) return toast("Reader server plugin unavailable.", "error");
       const recency = b => Math.max(store.books[b.key]?.updatedAt ?? 0, store.books[b.key]?.openedAt ?? 0);
@@ -987,17 +985,27 @@ export default Plugin.define({
       mode: "global",
       commands: [{
         id: "opencode-reader.read",
-        title: "Reader: read a book",
+        title: "Reader: my books",
         group: "Reader",
         palette: true,
         slash: {
-          name: "read",
+          name: "read"
+        },
+        run: readCommand
+      }, {
+        id: "opencode-reader.add",
+        title: "Reader: add books",
+        group: "Reader",
+        palette: true,
+        // `/add <path>` adds at once; `/add` alone (or the palette) asks for the path.
+        slash: {
+          name: "add",
           arguments: true
         },
-        run: input => readCommand(input)
+        run: input => addCommand(commandArgument(input, "add") || undefined)
       }, {
         id: "opencode-reader.books",
-        title: "Reader: Boox library",
+        title: "Reader: BOOX library",
         group: "Reader",
         palette: true,
         slash: {

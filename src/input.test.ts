@@ -12,12 +12,12 @@ test("dragged paths lose their quotes and backslash escapes", () => {
 })
 
 test("the slash command argument, with or without the command", () => {
-  assert.equal(commandArgument(undefined, "read"), "")
-  assert.equal(commandArgument("", "read"), "")
-  assert.equal(commandArgument("/read", "read"), "")
-  assert.equal(commandArgument("/read ~/a.epub ", "read"), "~/a.epub")
-  assert.equal(commandArgument(" ~/a.epub", "read"), "~/a.epub")
-  assert.equal(commandArgument("/reader.epub", "read"), "/reader.epub")
+  assert.equal(commandArgument(undefined, "add"), "")
+  assert.equal(commandArgument("", "add"), "")
+  assert.equal(commandArgument("/add", "add"), "")
+  assert.equal(commandArgument("/add ~/a.epub ", "add"), "~/a.epub")
+  assert.equal(commandArgument(" ~/a.epub", "add"), "~/a.epub")
+  assert.equal(commandArgument("/addendum.epub", "add"), "/addendum.epub")
 })
 
 test("tokens lose blanks and quotes", () => {
