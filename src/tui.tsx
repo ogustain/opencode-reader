@@ -27,7 +27,7 @@ import {
   type PullResult, type PushResult, type SyncSettings,
 } from "./rpc"
 import {
-  decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE, type OwnPush, type TreeNode,
+  batchSummary, decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE, type OwnPush, type TreeNode,
 } from "./sync"
 import type { Paragraph } from "./text"
 
@@ -559,7 +559,7 @@ export default Plugin.define({
       toast(`Downloading ${todo.length} books (Onyx cloud, then the Boox)…`)
       // After a token refusal the rest go over ADB only, and the expiry is said once, with the summary.
       const { downloaded, onBoox, failed, expired } = await downloadBatch(todo, (b, cloud) => fetchBook(b, true, cloud))
-      const summary = `${downloaded} downloaded, ${onBoox} only on the Boox${failed.length ? `; failed: ${failed.map((b) => b.title).join(", ")}` : ""}`
+      const summary = batchSummary({ downloaded, onBoox, failed: failed.map((f) => ({ title: f.book.title, error: f.error })) })
       if (expired) {
         setCloudState("expired")
         expiredShown = true

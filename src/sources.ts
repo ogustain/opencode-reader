@@ -15,8 +15,10 @@ export type Obtained = { ok: true; source: "cloud" | "adb"; expired?: true } | {
 
 /**
  * Tries the cloud download (when configured), then the ADB copy. A missing,
- * refused or unreachable source falls through quietly to the next one; with
- * none left, an expired token keeps its message, otherwise `NOT_HERE`.
+ * refused or unreachable source falls through quietly to the next one. With
+ * none left: an expired token keeps its message; a file the cloud does not
+ * have (or no cloud) is `NOT_HERE` (`notHere`); a cloud unreachable or in
+ * error says so, as it may well have the file.
  */
 export async function obtainBook(sources: { cloud?: () => Promise<unknown>; adb: () => Promise<unknown> }): Promise<Obtained> {
   let cloud: OnyxError | undefined
@@ -38,9 +40,9 @@ export async function obtainBook(sources: { cloud?: () => Promise<unknown>; adb:
     if (state !== "none" && state !== "offline" && state !== "missing") return { ok: false, error: error instanceof Error ? error.message : String(error), ...expired }
   }
   if (cloud?.state === "expired") return { ok: false, error: EXPIRED_MESSAGE, expired: true }
-  // A cloud file that failed its checks (size, not a ZIP) is worth saying.
-  if (cloud?.state === "error") return { ok: false, error: `${NOT_HERE}. Onyx cloud: ${cloud.message}`, notHere: true }
-  return { ok: false, error: NOT_HERE, notHere: true }
+  if (!cloud || cloud.state === "missing" || cloud.state === "off") return { ok: false, error: NOT_HERE, notHere: true }
+  // Unreachable, an HTTP error, a file that failed its checks: not "not uploaded".
+  return { ok: false, error: cloud.state === "offline" ? `offline: ${cloud.message}` : cloud.message }
 }
 
 export type Fetched = { ok: true; source: "cache" | "cloud" | "adb"; expired?: true } | { ok: false; error: string; notHere?: true; expired?: true }

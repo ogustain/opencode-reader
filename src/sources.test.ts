@@ -29,7 +29,14 @@ test("with no source left: the upload hint, the expired-token message, or the AD
   assert.deepEqual(await obtainBook({ adb: fail(new AdbError("offline", "offline")) }), { ok: false, error: NOT_HERE, notHere: true })
   assert.deepEqual(await obtainBook({ cloud: fail(new OnyxError("expired", EXPIRED_MESSAGE)), adb: fail(noBoox) }), { ok: false, error: EXPIRED_MESSAGE, expired: true })
   const bad = await obtainBook({ cloud: fail(new OnyxError("error", "the cloud file is not an EPUB")), adb: fail(noBoox) })
-  assert.deepEqual(bad, { ok: false, error: `${NOT_HERE}. Onyx cloud: the cloud file is not an EPUB`, notHere: true })
+  assert.deepEqual(bad, { ok: false, error: "the cloud file is not an EPUB" })
+  // A cloud that may have the file but cannot give it is not "not uploaded".
+  assert.deepEqual(await obtainBook({ cloud: fail(new OnyxError("error", "Onyx cloud: HTTP 503")), adb: fail(noBoox) }), { ok: false, error: "Onyx cloud: HTTP 503" })
+  assert.deepEqual(await obtainBook({ cloud: fail(new OnyxError("offline", "Onyx cloud unreachable")), adb: fail(noBoox) }), {
+    ok: false,
+    error: "offline: Onyx cloud unreachable",
+  })
+  assert.deepEqual(await obtainBook({ cloud: fail(new OnyxError("off", "x")), adb: fail(noBoox) }), { ok: false, error: NOT_HERE, notHere: true })
   assert.deepEqual(await obtainBook({ cloud: fail(new OnyxError("missing", "x")), adb: fail(new AdbError("unauthorized", "Allow USB debugging on the Boox")) }), {
     ok: false,
     error: "Allow USB debugging on the Boox",

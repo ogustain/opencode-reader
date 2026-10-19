@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mapChapter } from "./neoposition.ts"
 import {
-  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, pendingPushes, progressFor, pushQueue, settles, syncFailure, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
+  cloudLibrary, cloudReading, cloudSide, batchSummary, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, pendingPushes, progressFor, pushQueue, settles, syncFailure, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
   type NeoRef,
 } from "./sync.ts"
 
@@ -274,10 +274,10 @@ test("a batch download stops asking the cloud after a token refusal, and says it
     if (book === "b") return { ok: false, expired: true } // Cloud refused, no Boox plugged in.
     if (book === "c") return { ok: true } // Copied over ADB.
     if (book === "d") return { ok: false, notHere: true }
-    return { ok: false }
+    return { ok: false, error: "Onyx cloud: HTTP 503" }
   })
   assert.deepEqual(asked, [["a", true], ["b", true], ["c", false], ["d", false], ["e", false]])
-  assert.deepEqual(result, { downloaded: 2, onBoox: 2, failed: ["e"], expired: true })
+  assert.deepEqual(result, { downloaded: 2, onBoox: 2, failed: [{ book: "e", error: "Onyx cloud: HTTP 503" }], expired: true })
   const fine = await downloadBatch(["a"], async () => ({ ok: true }))
   assert.equal(fine.expired, false)
 })
@@ -355,4 +355,20 @@ test("a failed sync names its cause, except when sync is off or the token expire
   assert.equal(syncFailure("off", "Onyx cloud not configured (see README)"), undefined)
   assert.equal(syncFailure("expired", "Onyx token expired"), undefined)
   assert.equal(syncFailure("ok", undefined), undefined)
+})
+
+test("a batch summary lists failures by cause, apart from books not uploaded yet", () => {
+  assert.equal(batchSummary({ downloaded: 3, onBoox: 0, failed: [] }), "3 downloaded")
+  assert.equal(
+    batchSummary({
+      downloaded: 1,
+      onBoox: 2,
+      failed: [
+        { title: "Alpha", error: "Onyx cloud: HTTP 503" },
+        { title: "Beta", error: "offline: Onyx cloud unreachable" },
+        { title: "Gamma", error: "Onyx cloud: HTTP 503" },
+      ],
+    }),
+    "1 downloaded, 2 not uploaded yet (only on the Boox); failed (Onyx cloud: HTTP 503): Alpha, Gamma; failed (offline: Onyx cloud unreachable): Beta",
+  )
 })

@@ -18,25 +18,35 @@ type Doc = Record<string, unknown>
 /** Said once when the token is refused (shared with the TUI, which cannot import `onyx.ts`). */
 export const EXPIRED_MESSAGE = "Onyx token expired: paste a new one (see README)"
 
-export type BatchFetch = { ok: boolean; notHere?: boolean; expired?: boolean }
+export type BatchFetch = { ok: boolean; notHere?: boolean; expired?: boolean; error?: string }
 
 /**
  * Fetches books one at a time. Once the token is refused the rest skip the
  * cloud (`cloud` false; ADB may still copy them), and `expired` says so once.
+ * `onBoox`: not uploaded yet (nor copied over ADB); `failed`: the others,
+ * each with its cause.
  */
 export async function downloadBatch<B>(books: readonly B[], fetch: (book: B, cloud: boolean) => Promise<BatchFetch>) {
   let downloaded = 0
   let onBoox = 0
   let expired = false
-  const failed: B[] = []
+  const failed: Array<{ book: B; error: string }> = []
   for (const book of books) {
     const result = await fetch(book, !expired)
     if (result.expired) expired = true
     if (result.ok) downloaded++
     else if (result.notHere || result.expired) onBoox++
-    else failed.push(book)
+    else failed.push({ book, error: result.error || "unknown error" })
   }
   return { downloaded, onBoox, failed, expired }
+}
+
+/** "N downloaded, N not uploaded yet; failed (cause): titles; …", failures grouped by cause. */
+export function batchSummary(result: { downloaded: number; onBoox: number; failed: ReadonlyArray<{ title: string; error: string }> }): string {
+  const byCause = new Map<string, string[]>()
+  for (const f of result.failed) byCause.set(f.error, [...(byCause.get(f.error) ?? []), f.title])
+  const counts = `${result.downloaded} downloaded${result.onBoox ? `, ${result.onBoox} not uploaded yet (only on the Boox)` : ""}`
+  return [counts, ...[...byCause].map(([cause, titles]) => `failed (${cause}): ${titles.join(", ")}`)].join("; ")
 }
 
 export type CloudBook = {

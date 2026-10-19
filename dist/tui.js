@@ -28,7 +28,7 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
 import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
-import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE } from "../src/sync.ts";
+import { batchSummary, decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE } from "../src/sync.ts";
 const PANEL = "opencode-reader";
 const SIDEBAR_COLUMNS = 37;
 const SAVE_DELAY_MS = 800;
@@ -674,7 +674,14 @@ export default Plugin.define({
         failed,
         expired
       } = await downloadBatch(todo, (b, cloud) => fetchBook(b, true, cloud));
-      const summary = `${downloaded} downloaded, ${onBoox} only on the Boox${failed.length ? `; failed: ${failed.map(b => b.title).join(", ")}` : ""}`;
+      const summary = batchSummary({
+        downloaded,
+        onBoox,
+        failed: failed.map(f => ({
+          title: f.book.title,
+          error: f.error
+        }))
+      });
       if (expired) {
         setCloudState("expired");
         expiredShown = true;
