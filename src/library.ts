@@ -3,10 +3,10 @@
  * per-book metadata and the chapter index (characters per spine document).
  * One chapter is decoded at a time; nothing keeps a whole book in memory.
  */
-import { createHash } from "node:crypto"
-import { readdirSync, realpathSync, statSync, type Dirent } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import { closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, writeSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
-import { basename, join, posix, resolve, sep } from "node:path"
+import { basename, join, posix, relative, resolve, sep } from "node:path"
 import { decodeXml, fileSource, openZip, readPackage, resolveHref, type Zip } from "./epub.ts"
 import { mapChapter, type ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
@@ -175,4 +175,187 @@ export function readNote(path: string, href: string): string {
     if (text === undefined) throw new Error(`note #${id} not found`)
     return text.length > MAX_NOTE ? `${text.slice(0, MAX_NOTE)}…` : text
   })
+}
+
+/** Largest book file added, as for the cloud and ADB copies. */
+export const MAX_ADD_FILE = 512 * 1024 * 1024
+export const ALREADY_THERE = "already there"
+
+export type AddedBook = { path: string; key: string; title: string }
+/** `existing`: the copy already in the folder, for an "already there" book. */
+export type AddResult = { added: AddedBook[]; skipped: Array<{ name: string; reason: string; existing?: AddedBook }> }
+
+/** The reason shown for a book that does not open. */
+function refusal(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  if (/protected/.test(text)) return "protected (DRM)"
+  if (/too large/.test(text)) return "too large"
+  if (/not a ZIP|not an EPUB|no readable chapters/.test(text)) return "not an EPUB"
+  return "unreadable"
+}
+
+/** SHA-256 of a file's content, read in chunks. */
+function contentHash(path: string): string {
+  const hash = createHash("sha256")
+  const fd = openSync(path, "r")
+  try {
+    const buffer = Buffer.alloc(1024 * 1024)
+    for (;;) {
+      const n = readSync(fd, buffer, 0, buffer.length, null)
+      if (n === 0) break
+      hash.update(buffer.subarray(0, n))
+    }
+  } finally {
+    closeSync(fd)
+  }
+  return hash.digest("hex")
+}
+
+/**
+ * Copies `file` into `dir` under `name`, or `name (2)`, `(3)`…: a 0600 temp
+ * file in `dir`, written whole and flushed, then linked to a free name (the
+ * link never replaces a file) and removed. Returns the new path.
+ */
+function copyInto(file: string, dir: string, name: string): string {
+  const temp = join(dir, `.${randomBytes(6).toString("hex")}.epub.tmp`)
+  const out = openSync(temp, "wx", 0o600)
+  try {
+    try {
+      const source = openSync(file, "r")
+      try {
+        const buffer = Buffer.alloc(1024 * 1024)
+        for (;;) {
+          const n = readSync(source, buffer, 0, buffer.length, null)
+          if (n === 0) break
+          for (let done = 0; done < n; ) done += writeSync(out, buffer, done, n - done)
+        }
+      } finally {
+        closeSync(source)
+      }
+      fsyncSync(out)
+    } finally {
+      closeSync(out)
+    }
+    const stem = name.replace(/\.epub$/i, "")
+    for (let n = 1; ; n++) {
+      const dest = join(dir, n === 1 ? name : `${stem} (${n}).epub`)
+      try {
+        linkSync(temp, dest)
+        rmSync(temp, { force: true })
+        return dest
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === "EEXIST") continue
+        // A file system without hard links: rename to a name seen free.
+        if (code !== "EPERM" && code !== "ENOTSUP" && code !== "ENOSYS" && code !== "EMLINK" && code !== "EOPNOTSUPP") throw error
+        try {
+          lstatSync(dest)
+          continue
+        } catch {
+          renameSync(temp, dest)
+          return dest
+        }
+      }
+    }
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
+}
+
+/**
+ * Copies the EPUB at `source`, or the EPUBs of a folder (three levels deep, as
+ * `scanEpubs`), into `dir` (created when missing). A book is added only when
+ * it opens as a book does for reading (no DRM, same limits). Nothing is ever
+ * overwritten: a book identical to one in `dir` (size and content), or a
+ * source already in `dir`, is "already there"; another book of the same
+ * name gets a " (2)" suffix.
+ */
+export function addBooks(source: string, dir: string): AddResult {
+  const result: AddResult = { added: [], skipped: [] }
+  let files: string[]
+  try {
+    files = statSync(source).isDirectory() ? scanEpubs(source) : [source]
+  } catch {
+    result.skipped.push({ name: basename(source), reason: "not found" })
+    return result
+  }
+  // Books of `dir` by size, hashed only when a candidate has the same size.
+  let bySize: Map<number, string[]> | undefined
+  const hashes = new Map<string, string>()
+  const hashOf = (path: string) => hashes.get(path) ?? hashes.set(path, contentHash(path)).get(path)!
+  const known = (path: string): AddedBook => {
+    let title = fallback(path)
+    try {
+      title = readMeta(path).title
+    } catch {
+      // Listed under its file name.
+    }
+    return { path, key: bookKey({ file: path }), title }
+  }
+  for (const file of files) {
+    const name = basename(file)
+    const skip = (reason: string, existing?: AddedBook) => void result.skipped.push({ name, reason, ...(existing ? { existing } : {}) })
+    if (!/\.epub$/i.test(name)) {
+      skip("not an EPUB")
+      continue
+    }
+    let size: number
+    try {
+      const stat = statSync(file)
+      if (!stat.isFile()) {
+        skip("not an EPUB")
+        continue
+      }
+      size = stat.size
+    } catch {
+      skip("unreadable")
+      continue
+    }
+    if (size > MAX_ADD_FILE) {
+      skip("too large")
+      continue
+    }
+    let title: string
+    try {
+      title = buildIndex(file).title
+    } catch (error) {
+      skip(refusal(error))
+      continue
+    }
+    if (within(file, [dir])) {
+      // Named as the library lists it.
+      const inside = join(dir, relative(realpathSync(dir), realpathSync(file)))
+      skip(ALREADY_THERE, { path: inside, key: bookKey({ file: inside }), title })
+      continue
+    }
+    try {
+      if (!bySize) {
+        mkdirSync(dir, { recursive: true })
+        bySize = new Map()
+        for (const path of scanEpubs(dir)) {
+          try {
+            const s = statSync(path).size
+            bySize.set(s, [...(bySize.get(s) ?? []), path])
+          } catch {
+            // Gone meanwhile.
+          }
+        }
+      }
+      const same = (bySize.get(size) ?? []).find((path) => hashOf(path) === hashOf(file))
+      if (same) {
+        skip(ALREADY_THERE, known(same))
+        continue
+      }
+      // A hidden name would not be listed.
+      const target = name.replace(/^\.+/, "")
+      const dest = copyInto(file, dir, /\.epub$/i.test(target) && target.length > 5 ? target : "book.epub")
+      bySize.set(size, [...(bySize.get(size) ?? []), dest])
+      hashes.set(dest, hashOf(file))
+      result.added.push({ path: dest, key: bookKey({ file: dest }), title })
+    } catch (error) {
+      skip(`copy failed (${(error as NodeJS.ErrnoException).code ?? "error"})`)
+    }
+  }
+  return result
 }

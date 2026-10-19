@@ -1,12 +1,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readdirSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
 import { bufferSource, decodeXml, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
-import { bookKey, buildIndex, cacheFile, MAX_NOTE, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
+import { addBooks, bookKey, buildIndex, cacheFile, MAX_NOTE, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
 /** `size` / `compressed` override the sizes declared in the central directory (malformed archives). */
@@ -347,4 +347,66 @@ test("documents are decoded by byte order mark or XML declaration: UTF-8 and UTF
   assert.deepEqual(readChapter(path, 0), [{ text: "Un", heading: true }, { text: "Première page — 東京." }])
   assert.equal(buildIndex(path).chapters[0].title, "Un")
   assert.deepEqual(readChapterMap(path, 0).paragraphs, readChapter(path, 0))
+})
+
+test("adding books: a valid file is copied 0600 into a folder created when missing, never twice", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const dir = join(await mkdtemp(join(tmpdir(), "opencode-reader-")), "Books", "new")
+  const source = join(from, "book.epub")
+  await writeFile(source, sampleEpub())
+  const first = addBooks(source, dir)
+  const dest = join(dir, "book.epub")
+  assert.deepEqual(first, { added: [{ path: dest, key: bookKey({ file: dest }), title: "Le Petit Livre d’essai" }], skipped: [] })
+  assert.ok(readFileSync(dest).equals(readFileSync(source)))
+  assert.equal(statSync(dest).mode & 0o777, 0o600)
+  assert.deepEqual(scanEpubs(dir), [dest])
+  assert.deepEqual(readdirSync(dir), ["book.epub"]) // No temp file left.
+
+  // The same content, under any name, is already there: the copy in the folder is given.
+  const renamed = join(from, "other name.epub")
+  await writeFile(renamed, sampleEpub())
+  const again = addBooks(renamed, dir)
+  assert.deepEqual(again.added, [])
+  assert.deepEqual(again.skipped, [{ name: "other name.epub", reason: "already there", existing: first.added[0] }])
+
+  // Another book of the same name gets a suffix; the first copy is untouched.
+  const other = join(await mkdtemp(join(tmpdir(), "opencode-reader-from-")), "book.epub")
+  await writeFile(other, sampleEpub([], "<p>Another text.</p>"))
+  const suffixed = addBooks(other, dir)
+  assert.deepEqual(suffixed.added.map((b) => b.path), [join(dir, "book (2).epub")])
+  assert.ok(readFileSync(dest).equals(readFileSync(source)))
+  assert.ok(readFileSync(join(dir, "book (2).epub")).equals(readFileSync(other)))
+
+  // A source already in the folder is already there.
+  assert.deepEqual(addBooks(dest, dir), { added: [], skipped: [{ name: "book.epub", reason: "already there", existing: first.added[0] }] })
+  assert.deepEqual(addBooks(join(from, "missing.epub"), dir), { added: [], skipped: [{ name: "missing.epub", reason: "not found" }] })
+})
+
+test("adding books: a folder's EPUBs three levels deep; non-EPUB and DRM files are refused", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  await mkdir(join(from, "a", "b", "c"), { recursive: true })
+  await writeFile(join(from, "one.epub"), sampleEpub())
+  await writeFile(join(from, "a", "b", "two.epub"), sampleEpub([], "<p>Two.</p>"))
+  await writeFile(join(from, "a", "b", "c", "deep.epub"), sampleEpub([], "<p>Too deep.</p>"))
+  await writeFile(join(from, "a", "same.epub"), sampleEpub()) // Same content as one.epub.
+  await writeFile(join(from, "fake.epub"), "not a zip at all")
+  await writeFile(join(from, "notes.txt"), "x")
+  const drm = sampleEpub([{ name: "META-INF/rights.xml", data: "<rights/>" }])
+  await writeFile(join(from, "locked.epub"), drm)
+  const result = addBooks(from, dir)
+  // one.epub and same.epub are one book: whichever comes first is added.
+  const names = result.added.map((b) => b.path.slice(dir.length + 1)).sort()
+  const twin = names[0] === "one.epub" ? "same.epub" : "one.epub"
+  assert.deepEqual(names, [twin === "one.epub" ? "same.epub" : "one.epub", "two.epub"])
+  assert.deepEqual(
+    result.skipped.map((s) => `${s.name}: ${s.reason}`).sort(),
+    ["fake.epub: not an EPUB", "locked.epub: protected (DRM)", `${twin}: already there`].sort(),
+  )
+  assert.deepEqual(addBooks(join(from, "notes.txt"), dir).skipped, [{ name: "notes.txt", reason: "not an EPUB" }])
+  assert.deepEqual(addBooks(join(from, "locked.epub"), dir).skipped, [{ name: "locked.epub", reason: "protected (DRM)" }])
+  // Adding the library folder itself adds nothing.
+  const own = addBooks(dir, dir)
+  assert.deepEqual([own.added, own.skipped.map((s) => s.reason)], [[], ["already there", "already there"]])
+  assert.deepEqual(readdirSync(dir).sort(), names)
 })

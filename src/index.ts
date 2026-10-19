@@ -3,8 +3,8 @@
  *
  * Owns every file, device and network access, so the TUI works against a
  * remote server too: lists the local EPUB folder (`dir`, default ~/Books) and
- * the cache of books copied from the Boox, serves book indexes and one chapter
- * at a time, reads the NeoReader library over ADB (read-only, at most once a
+ * the cache of books copied from the Boox, copies the books the reader adds
+ * into `dir`, serves book indexes and one chapter at a time, reads the NeoReader library over ADB (read-only, at most once a
  * minute, used to copy files), and syncs reading positions with the Onyx cloud
  * (library at most once a minute; one book doc GET per pull, GET + PUT per push).
  * A book file not on this computer is downloaded from the Onyx cloud storage when
@@ -17,11 +17,11 @@
  * page turn).
  */
 import { Plugin } from "@opencode/plugin"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 import { createAdb, type BooxBook } from "./adb.ts"
 import {
-  bookKey, buildIndex, cacheFile, defaultCacheDir, expandHome, fileStamp, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs,
-  within, type BookIndex,
+  addBooks, bookKey, buildIndex, cacheFile, defaultCacheDir, expandHome, fileStamp, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs,
+  within, type AddResult, type BookIndex,
 } from "./library.ts"
 import type { ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
@@ -359,6 +359,16 @@ export default Plugin.define({
           return { ok: true, text: readNote(path, href) }
         } catch (error) {
           return { ok: false, error: message(error) }
+        }
+      },
+      add: async (input): Promise<AddResult> => {
+        const path = (input as { path?: unknown } | undefined)?.path
+        if (typeof path !== "string" || !path.trim()) return { added: [], skipped: [{ name: "", reason: "no path" }] }
+        const source = resolve(expandHome(path.trim()))
+        try {
+          return addBooks(source, dir)
+        } catch (error) {
+          return { added: [], skipped: [{ name: basename(source), reason: message(error) }] }
         }
       },
     })

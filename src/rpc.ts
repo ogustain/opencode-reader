@@ -16,6 +16,7 @@ export type BookEntry = {
 }
 
 export type LibraryResult = { dir: string; books: BookEntry[] }
+export type { AddResult } from "./library.ts"
 export type BooxListing = {
   state: AdbState
   message: string
@@ -95,6 +96,8 @@ export const ReaderRpc = Rpc.define({
     agree: { input: object, output: object },
     /** { path, booxPath, spine, offset, percent, finished, turnedAt, force? } → PushResult (GET, then PUT of the book doc; `force`: the `_rev` the reader chose over) */
     push: { input: object, output: object },
+    /** { path } → AddResult (an EPUB file, or a folder's EPUBs, copied into `dir`) */
+    add: { input: object, output: object },
   },
   events: {},
 })
