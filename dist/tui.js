@@ -11,10 +11,12 @@ import { createElement as _$createElement } from "@opentui/solid";
  * TUI half of the opencode-reader plugin.
  *
  * `/read` picks a book from the server's library and opens it in the session
- * panel, or adds books to it ("Add books…", `/read <path>`); `/books` browses the Boox library (the Onyx cloud's collections, or
- * the device over ADB without a cloud token). Positions are `{ spine, offset }`,
- * saved per book (debounced) in durable storage. Only the current chapter is
- * held, and only the visible lines are rendered.
+ * panel, or adds books to it ("Add books…", `/read <path>`); `/books` browses
+ * the Boox library (the Onyx cloud's collections, or the device over ADB
+ * without a cloud token; "Connect a BOOX…" sets the token when there is
+ * neither). Positions are `{ spine, offset }`, saved per book (debounced) in
+ * durable storage. Only the current chapter is held, and only the visible
+ * lines are rendered.
  *
  * Sync with the Boox, for books copied from it, automatic only when certain:
  * opening a book or the panel pulls the cloud position when only the Boox
@@ -269,7 +271,13 @@ export default Plugin.define({
 
     // ---- Sync with the Boox through the Onyx cloud --------------------------------
     let syncSettings;
-    const settings = async () => syncSettings ??= await reader.settings({}).catch(() => undefined);
+    // Whether a token is set: shows "Connect a BOOX…" or "disconnect" in the menus.
+    const [connected, setConnected] = createSignal(false);
+    const settings = async () => {
+      syncSettings ??= await reader.settings({}).catch(() => undefined);
+      if (syncSettings) setConnected(syncSettings.cloud);
+      return syncSettings;
+    };
     const [cloudState, setCloudState] = createSignal();
     let expiredShown = false;
     const noteCloud = (state, error) => {
@@ -654,6 +662,7 @@ export default Plugin.define({
         book: b
       }));
       const empty = books.length === 0;
+      const cloud = !!(await settings())?.cloud;
       const choice = await context.ui.dialog.select({
         title: empty ? "Read: no books yet" : "Read",
         placeholder: "Search books",
@@ -665,7 +674,14 @@ export default Plugin.define({
           },
           description: empty ? `No books yet. Add some, or put EPUB files in ${context.ui.format.path(library.dir)}` : `An EPUB file or a folder, copied into ${context.ui.format.path(library.dir)}`,
           category: "Library"
-        }, ...values.map(value => {
+        }, ...(cloud ? [] : [{
+          title: "Connect a BOOX…",
+          value: {
+            connect: true
+          },
+          description: "Sync your place with a BOOX e-reader",
+          category: "Library"
+        }]), ...values.map(value => {
           const b = value.book;
           const saved = store.books[b.key];
           return {
@@ -678,14 +694,36 @@ export default Plugin.define({
       });
       if (!choice) return;
       if ("add" in choice) return addCommand();
+      if ("connect" in choice) return connectCommand();
       if (await loadBook(choice.book)) openPanel();
     };
 
-    /** `/books` without the cloud: the device's library over ADB, with the "go to N %" hint for the way back. */
-    const booksOverAdb = async () => {
+    /**
+     * `/books` without the cloud: the device's library over ADB, with the "go to N %" hint for the way back.
+     * `offerConnect`: no token set; with no device either, connecting a BOOX is offered first.
+     */
+    const booksOverAdb = async (offerConnect = false) => {
       toast("Reading the Boox library…");
       const listing = (await refreshBoox(true)) ?? (await reader.boox({}).catch(() => undefined));
       if (!listing) return toast("Reader server plugin unavailable.", "error");
+      if (offerConnect && listing.state !== "ok") {
+        const next = await context.ui.dialog.select({
+          title: `Boox library: no BOOX found (${listing.message})`,
+          options: [{
+            title: "Connect a BOOX…",
+            value: "connect",
+            description: "Through the Onyx cloud, on any network"
+          },
+          // Without adb, USB has nothing to offer.
+          ...(listing.state === "missing" ? [] : [{
+            title: "Use USB (ADB) instead",
+            value: "adb",
+            description: listing.books.length ? "The last books seen over USB" : listing.message
+          }])]
+        });
+        if (next === "connect") return connectCommand();
+        if (next !== "adb") return;
+      }
       if (listing.books.length === 0) return toast(listing.state === "ok" ? "No EPUB on the Boox." : listing.message, "warning");
       const books = [...listing.books].sort((a, b) => b.lastAccess - a.lastAccess || a.title.localeCompare(b.title));
       const choice = await context.ui.dialog.select({
@@ -772,7 +810,7 @@ export default Plugin.define({
 
     /** `/books` with the cloud: collection → sub-collection → book, as on the Boox. */
     const booksCommand = async () => {
-      if (!(await settings())?.cloud) return booksOverAdb();
+      if (!(await settings())?.cloud) return booksOverAdb(true);
       toast("Reading the Boox library…");
       let listing = await reader.cloud({
         refresh: true
@@ -873,6 +911,78 @@ export default Plugin.define({
         } else return openCloudBook(choice.book);
       }
     };
+
+    /** The token or the cloud changed: settings, state and the expiry notice start afresh. */
+    const resetCloud = () => {
+      syncSettings = undefined;
+      expiredShown = false;
+      setCloudState(undefined);
+      return settings();
+    };
+
+    /** Guided connection: the account's region, then the token with how to get it (checked by the server before it is saved). */
+    const connectCommand = async () => {
+      setDialogOpen(true);
+      let token;
+      let server;
+      try {
+        server = await context.ui.dialog.select({
+          title: "Connect a BOOX: your Onyx account's server",
+          options: [{
+            title: "Europe",
+            value: "eur",
+            description: "eur.boox.com"
+          }, {
+            title: "US",
+            value: "us",
+            description: "push.boox.com (US and other regions)"
+          }]
+        });
+        if (!server) return;
+        const site = server === "eur" ? "eur.boox.com" : "push.boox.com";
+        token = await context.ui.dialog.prompt({
+          title: "Connect a BOOX: paste your Onyx token",
+          description: `1. On the BOOX: Library → ⋯ → Library Settings → turn on Sync Switch. 2. In a browser, log in to ${site} with the BOOX account. ` + "3. Developer tools → Application → Local Storage → copy the value of token. It is checked with the Onyx cloud, then saved in a private file.",
+          placeholder: "eyJ…"
+        });
+      } finally {
+        setDialogOpen(false);
+      }
+      if (!token?.trim()) return;
+      toast("Checking the token with the Onyx cloud…");
+      const result = await reader.connect({
+        token,
+        server
+      }).catch(() => ({
+        ok: false,
+        error: "Reader server plugin unavailable."
+      }));
+      if (!result.ok) return toast(`Cannot connect: ${result.error}`, "error");
+      await resetCloud();
+      toast("BOOX connected", "success");
+      return booksCommand();
+    };
+    const disconnectCommand = async () => {
+      setDialogOpen(true);
+      const sure = await context.ui.dialog.select({
+        title: "Disconnect the BOOX?",
+        options: [{
+          title: "Disconnect",
+          value: true,
+          description: "Deletes the token; your positions, books and backups stay"
+        }, {
+          title: "Cancel",
+          value: false
+        }]
+      }).finally(() => setDialogOpen(false));
+      if (sure !== true) return;
+      const result = await reader.disconnect({}).catch(() => ({
+        ok: false,
+        error: "Reader server plugin unavailable."
+      }));
+      await resetCloud();
+      toast(result.ok ? "BOOX disconnected" : `Cannot disconnect: ${result.error}`, result.ok ? "success" : "error");
+    };
     context.keymap.layer(() => ({
       mode: "global",
       commands: [{
@@ -894,6 +1004,19 @@ export default Plugin.define({
           name: "books"
         },
         run: booksCommand
+      }, {
+        id: "opencode-reader.connect",
+        title: "Reader: connect a BOOX",
+        group: "Reader",
+        palette: true,
+        run: connectCommand
+      }, {
+        id: "opencode-reader.disconnect",
+        title: "Reader: disconnect the BOOX",
+        group: "Reader",
+        palette: true,
+        enabled: () => connected(),
+        run: disconnectCommand
       }]
     }));
     function ReaderPanel(props) {
