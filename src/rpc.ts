@@ -29,6 +29,7 @@ export type FetchResult =
   | { ok: false; error: string; notHere?: true; expired?: true }
 export type OpenResult = ({ ok: true } & BookIndex) | { ok: false; error: string }
 export type ChapterResult = { ok: true; paragraphs: Paragraph[] } | { ok: false; error: string }
+export type NoteResult = { ok: true; text: string } | { ok: false; error: string }
 
 export type SyncSettings = { cloud: boolean; pushIdleMinutes: number }
 /** The Onyx cloud library (last known when `state` is not "ok"). */
@@ -82,6 +83,8 @@ export const ReaderRpc = Rpc.define({
     open: { input: object, output: object },
     /** { path, spine } → ChapterResult */
     chapter: { input: object, output: object },
+    /** { path, href } → NoteResult (`href`: a note target of the chapter, `file#id`) */
+    note: { input: object, output: object },
     /** {} → SyncSettings */
     settings: { input: object, output: object },
     /** { refresh?: boolean } → CloudListing (the cloud is asked at most once a minute) */

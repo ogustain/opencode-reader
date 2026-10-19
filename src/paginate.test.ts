@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
-  atBookEnd, booxHint, chooseStart, column, contents, fromPercent, isFinished, justify, keepsStored, lastScreen, layout, lineAt, nextChapter, nextScreen, previousScreen,
+  atBookEnd, booxHint, chooseStart, column, contents, fromPercent, isFinished, justify, keepsStored, lastScreen, layout, lineAt, nextChapter, nextScreen, notesBetween, previousScreen,
   progressOf, savedFinish, savedTimes, screenAt, toPercent, turnForward,
 } from "./paginate.ts"
 import { chapterLength, type Paragraph } from "./text.ts"
@@ -309,4 +309,17 @@ test("a window holding an older reading never overwrites a newer stored one", ()
   assert.equal(keepsStored({ updatedAt: 100 }, 250), false) // A turned a page since: A wins.
   assert.equal(keepsStored({ updatedAt: 100 }, 0), true) // Opened without turning, after another window read.
   assert.equal(keepsStored(undefined, 0), false)
+})
+
+test("the notes of a screen: references from its first offset to the next screen's, in order, each once", () => {
+  const paragraphs = [
+    { text: "abc¹", notes: [{ at: 3, label: "¹", href: "n#1" }] },
+    { text: "de²f³", notes: [{ at: 2, label: "²", href: "n#2" }, { at: 4, label: "³", href: "n#1" }] },
+  ]
+  // Chapter offsets: ¹ at 3, ² at 7, ³ at 9.
+  assert.deepEqual(notesBetween(paragraphs, 0, 5).map((n) => [n.label, n.at]), [["¹", 3]])
+  assert.deepEqual(notesBetween(paragraphs, 4, Infinity).map((n) => [n.label, n.at]), [["²", 7], ["³", 9]])
+  assert.deepEqual(notesBetween(paragraphs, 0, Infinity).map((n) => n.label), ["¹", "²"])
+  assert.deepEqual(notesBetween(paragraphs, 4, 7), [])
+  assert.deepEqual(notesBetween([{ text: "plain" }], 0, Infinity), [])
 })

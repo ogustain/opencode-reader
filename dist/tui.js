@@ -27,9 +27,10 @@ import { createElement as _$createElement } from "@opentui/solid";
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
-import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
+import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextScreen, notesBetween, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
 import { batchSummary, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE } from "../src/sync.ts";
+import { noteBlock } from "../src/text.ts";
 const PANEL = "opencode-reader";
 const SIDEBAR_COLUMNS = 37;
 const SAVE_DELAY_MS = 800;
@@ -927,6 +928,57 @@ export default Plugin.define({
           offset: lastScreen(paragraphs ? wrap(paragraphs) : [], height())
         });
       };
+      // The notes of the screen shown (`n`), over the text until closed; the position does not move.
+      const [notesView, setNotesView] = createSignal();
+      const notes = () => notesView()?.key === book()?.key ? notesView() : undefined;
+      const noteLines = createMemo(() => layout(notes()?.paragraphs ?? [], textColumn().width));
+      const noteCache = new Map();
+      const noteOf = async (b, href) => {
+        const known = noteCache.get(`${b.key}#${href}`);
+        if (known !== undefined) return known;
+        const result = await reader.note({
+          path: b.path,
+          href
+        }).catch(e => ({
+          ok: false,
+          error: failure(e)
+        }));
+        if (!result.ok) return `(${result.error})`;
+        noteCache.set(`${b.key}#${href}`, result.text);
+        return result.text;
+      };
+      const showNotes = async () => {
+        const b = book();
+        const c = chapter();
+        if (!b || !c || !ready()) return;
+        const from = lines()[screen().first]?.start ?? 0;
+        const refs = notesBetween(c.paragraphs, from, nextScreen(lines(), height(), position().offset) ?? Infinity);
+        if (refs.length === 0) return toast("No notes on this page");
+        const view = {
+          key: b.key,
+          paragraphs: refs.map(r => ({
+            text: `${r.label} …`
+          })),
+          top: 0
+        };
+        setNotesView(view);
+        const texts = await Promise.all(refs.map(r => noteOf(b, r.href)));
+        // Still this view (scrolled or not): its texts replace the placeholders.
+        const v = notesView();
+        if (v?.paragraphs === view.paragraphs) setNotesView({
+          ...v,
+          paragraphs: refs.map((r, i) => ({
+            text: noteBlock(r.label, texts[i])
+          }))
+        });
+      };
+      const scrollNotes = by => {
+        const v = notes();
+        if (v) setNotesView({
+          ...v,
+          top: Math.max(0, Math.min(v.top + by, noteLines().length - height()))
+        });
+      };
       const withDialog = async show => {
         if (dialogOpen()) return;
         setDialogOpen(true);
@@ -985,7 +1037,7 @@ export default Plugin.define({
       });
       context.keymap.layer(() => ({
         priority: 10,
-        enabled: () => props.panel.focused && !dialogOpen(),
+        enabled: () => props.panel.focused && !dialogOpen() && !notes(),
         commands: [
         // Space is a silent alias of → (not in the hint line).
         {
@@ -1004,6 +1056,11 @@ export default Plugin.define({
           bind: "t",
           run: () => void showContents()
         }, {
+          title: "Notes of this page",
+          group: "Reader",
+          bind: "n",
+          run: () => void showNotes()
+        }, {
           title: "Display settings",
           group: "Reader",
           bind: "s",
@@ -1018,6 +1075,36 @@ export default Plugin.define({
           group: "Reader",
           bind: "q,escape",
           run: () => props.panel.close()
+        }]
+      }));
+      context.keymap.layer(() => ({
+        priority: 10,
+        enabled: () => props.panel.focused && !dialogOpen() && !!notes(),
+        commands: [{
+          title: "Scroll the notes down",
+          group: "Reader",
+          bind: "down",
+          run: () => scrollNotes(1)
+        }, {
+          title: "Scroll the notes up",
+          group: "Reader",
+          bind: "up",
+          run: () => scrollNotes(-1)
+        }, {
+          title: "Next page of notes",
+          group: "Reader",
+          bind: "right,space",
+          run: () => scrollNotes(height())
+        }, {
+          title: "Previous page of notes",
+          group: "Reader",
+          bind: "left",
+          run: () => scrollNotes(-height())
+        }, {
+          title: "Back to the text",
+          group: "Reader",
+          bind: "n,q,escape",
+          run: () => setNotesView(undefined)
         }]
       }));
       // Closing the panel sends the position to the Boox.
@@ -1086,38 +1173,58 @@ export default Plugin.define({
             });
             _$insert(_el$8, _$createComponent(Show, {
               get when() {
-                return chapter();
+                return notes();
               },
               get fallback() {
-                return (() => {
-                  var _el$17 = _$createElement("text");
-                  _$insertNode(_el$17, _$createTextNode(`Loading…`));
-                  _$effect(_$p => _$setProp(_el$17, "fg", theme.text.muted, _$p));
-                  return _el$17;
-                })();
-              },
-              get children() {
-                return _$createComponent(Index, {
-                  get each() {
-                    return screen().lines;
+                return _$createComponent(Show, {
+                  get when() {
+                    return chapter();
                   },
-                  children: line => (() => {
-                    var _el$19 = _$createElement("text");
-                    _$setProp(_el$19, "height", 1);
-                    _$setProp(_el$19, "wrapMode", "none");
-                    _$insert(_el$19, (() => {
-                      var _c$ = _$memo(() => !!line().heading);
-                      return () => _c$() ? (() => {
-                        var _el$20 = _$createElement("b");
-                        _$insert(_el$20, () => line().text || " ");
-                        return _el$20;
-                      })() : line().text || " ";
-                    })());
-                    _$effect(_$p => _$setProp(_el$19, "fg", theme.text.base, _$p));
-                    return _el$19;
-                  })()
+                  get fallback() {
+                    return (() => {
+                      var _el$17 = _$createElement("text");
+                      _$insertNode(_el$17, _$createTextNode(`Loading…`));
+                      _$effect(_$p => _$setProp(_el$17, "fg", theme.text.muted, _$p));
+                      return _el$17;
+                    })();
+                  },
+                  get children() {
+                    return _$createComponent(Index, {
+                      get each() {
+                        return screen().lines;
+                      },
+                      children: line => (() => {
+                        var _el$19 = _$createElement("text");
+                        _$setProp(_el$19, "height", 1);
+                        _$setProp(_el$19, "wrapMode", "none");
+                        _$insert(_el$19, (() => {
+                          var _c$ = _$memo(() => !!line().heading);
+                          return () => _c$() ? (() => {
+                            var _el$20 = _$createElement("b");
+                            _$insert(_el$20, () => line().text || " ");
+                            return _el$20;
+                          })() : line().text || " ";
+                        })());
+                        _$effect(_$p => _$setProp(_el$19, "fg", theme.text.base, _$p));
+                        return _el$19;
+                      })()
+                    });
+                  }
                 });
-              }
+              },
+              children: v => _$createComponent(Index, {
+                get each() {
+                  return noteLines().slice(v().top, v().top + height());
+                },
+                children: line => (() => {
+                  var _el$21 = _$createElement("text");
+                  _$setProp(_el$21, "height", 1);
+                  _$setProp(_el$21, "wrapMode", "none");
+                  _$insert(_el$21, () => line().text || " ");
+                  _$effect(_$p => _$setProp(_el$21, "fg", theme.text.base, _$p));
+                  return _el$21;
+                })()
+              })
             }));
             _$effect(_$p => _$setProp(_el$8, "paddingLeft", textColumn().margin, _$p));
             return _el$8;
@@ -1136,12 +1243,12 @@ export default Plugin.define({
                 return hint();
               },
               children: n => (() => {
-                var _el$21 = _$createElement("text");
-                _$setProp(_el$21, "flexShrink", 0);
-                _$setProp(_el$21, "wrapMode", "none");
-                _$insert(_el$21, () => `Boox: go to ${n()} %`);
-                _$effect(_$p => _$setProp(_el$21, "fg", theme.text.feedback.warning.base, _$p));
-                return _el$21;
+                var _el$22 = _$createElement("text");
+                _$setProp(_el$22, "flexShrink", 0);
+                _$setProp(_el$22, "wrapMode", "none");
+                _$insert(_el$22, () => `Boox: go to ${n()} %`);
+                _$effect(_$p => _$setProp(_el$22, "fg", theme.text.feedback.warning.base, _$p));
+                return _el$22;
               })()
             }), null);
             _$insert(_el$9, _$createComponent(Show, {
@@ -1202,7 +1309,7 @@ export default Plugin.define({
             var _el$16 = _$createElement("text");
             _$setProp(_el$16, "height", 1);
             _$setProp(_el$16, "wrapMode", "none");
-            _$insert(_el$16, () => fit(props.panel.focused ? "←/→ page · t contents · s settings · f fullscreen · q close" : "click to read", width()));
+            _$insert(_el$16, () => fit(!props.panel.focused ? "click to read" : notes() ? "Notes · ↑/↓ scroll · ←/→ page · n/q back" : "←/→ page · t contents · n notes · s settings · f fullscreen · q close", width()));
             _$effect(_$p => _$setProp(_el$16, "fg", props.panel.focused ? theme.text.base : theme.text.muted, _$p));
             return _el$16;
           })()]
@@ -1243,74 +1350,74 @@ export default Plugin.define({
           return shown();
         },
         children: s => (() => {
-          var _el$22 = _$createElement("box"),
-            _el$23 = _$createElement("box"),
-            _el$24 = _$createElement("text"),
+          var _el$23 = _$createElement("box"),
+            _el$24 = _$createElement("box"),
             _el$25 = _$createElement("text"),
-            _el$26 = _$createElement("b"),
-            _el$28 = _$createElement("box");
-          _$insertNode(_el$22, _el$23);
-          _$setProp(_el$22, "flexDirection", "column");
+            _el$26 = _$createElement("text"),
+            _el$27 = _$createElement("b"),
+            _el$29 = _$createElement("box");
           _$insertNode(_el$23, _el$24);
-          _$insertNode(_el$23, _el$25);
-          _$insertNode(_el$23, _el$28);
-          _$setProp(_el$23, "flexDirection", "row");
-          _$setProp(_el$23, "gap", 1);
-          _$setProp(_el$23, "onMouseUp", () => void setView(draft => void (draft.open = !draft.open)).catch(() => {}));
-          _$setProp(_el$24, "flexShrink", 0);
-          _$insert(_el$24, () => view.open ? "▼" : "▶");
-          _$insertNode(_el$25, _el$26);
+          _$setProp(_el$23, "flexDirection", "column");
+          _$insertNode(_el$24, _el$25);
+          _$insertNode(_el$24, _el$26);
+          _$insertNode(_el$24, _el$29);
+          _$setProp(_el$24, "flexDirection", "row");
+          _$setProp(_el$24, "gap", 1);
+          _$setProp(_el$24, "onMouseUp", () => void setView(draft => void (draft.open = !draft.open)).catch(() => {}));
           _$setProp(_el$25, "flexShrink", 0);
-          _$insertNode(_el$26, _$createTextNode(`Reading`));
-          _$setProp(_el$28, "flexGrow", 1);
-          _$insert(_el$23, _$createComponent(Show, {
+          _$insert(_el$25, () => view.open ? "▼" : "▶");
+          _$insertNode(_el$26, _el$27);
+          _$setProp(_el$26, "flexShrink", 0);
+          _$insertNode(_el$27, _$createTextNode(`Reading`));
+          _$setProp(_el$29, "flexGrow", 1);
+          _$insert(_el$24, _$createComponent(Show, {
             get when() {
               return !view.open;
             },
             get children() {
-              var _el$29 = _$createElement("text");
-              _$setProp(_el$29, "flexShrink", 0);
-              _$setProp(_el$29, "wrapMode", "none");
-              _$insert(_el$29, () => pct(value()));
-              _$effect(_$p => _$setProp(_el$29, "fg", hint() ? theme.text.feedback.warning.base : theme.text.muted, _$p));
-              return _el$29;
+              var _el$30 = _$createElement("text");
+              _$setProp(_el$30, "flexShrink", 0);
+              _$setProp(_el$30, "wrapMode", "none");
+              _$insert(_el$30, () => pct(value()));
+              _$effect(_$p => _$setProp(_el$30, "fg", hint() ? theme.text.feedback.warning.base : theme.text.muted, _$p));
+              return _el$30;
             }
           }), null);
-          _$insert(_el$22, _$createComponent(Show, {
+          _$insert(_el$23, _$createComponent(Show, {
             get when() {
               return view.open;
             },
             get children() {
               return [(() => {
-                var _el$30 = _$createElement("box"),
-                  _el$31 = _$createElement("text");
-                _$insertNode(_el$30, _el$31);
-                _$setProp(_el$30, "onMouseUp", () => void reopen());
-                _$setProp(_el$31, "wrapMode", "none");
-                _$insert(_el$31, () => `📖 ${fit(s().title, SIDEBAR_COLUMNS - 3 - 3 - pct(value()).length)} — ${pct(value())}`);
-                _$effect(_$p => _$setProp(_el$31, "fg", theme.text.base, _$p));
-                return _el$30;
+                var _el$31 = _$createElement("box"),
+                  _el$32 = _$createElement("text");
+                _$insertNode(_el$31, _el$32);
+                _$setProp(_el$31, "onMouseUp", () => void reopen());
+                _$setProp(_el$32, "wrapMode", "none");
+                _$insert(_el$32, () => `📖 ${fit(s().title, SIDEBAR_COLUMNS - 3 - 3 - pct(value()).length)} — ${pct(value())}`);
+                _$effect(_$p => _$setProp(_el$32, "fg", theme.text.base, _$p));
+                return _el$31;
               })(), _$createComponent(Show, {
                 get when() {
                   return hint();
                 },
                 children: n => (() => {
-                  var _el$33 = _$createElement("text");
-                  _$setProp(_el$33, "wrapMode", "none");
-                  _$insert(_el$33, () => `Boox: go to ${n()} %`);
-                  _$effect(_$p => _$setProp(_el$33, "fg", theme.text.feedback.warning.base, _$p));
-                  return _el$33;
+                  var _el$34 = _$createElement("text");
+                  _$setProp(_el$34, "wrapMode", "none");
+                  _$insert(_el$34, () => `Boox: go to ${n()} %`);
+                  _$effect(_$p => _$setProp(_el$34, "fg", theme.text.feedback.warning.base, _$p));
+                  return _el$34;
                 })()
               }), _$createComponent(Show, {
                 get when() {
                   return s().cloud?.state === "ask";
                 },
                 get children() {
-                  var _el$32 = _$createElement("text");
-                  _$setProp(_el$32, "wrapMode", "none");
-                  _$insert(_el$32, () => fit(ASK_HINT, SIDEBAR_COLUMNS));
-                  _$effect(_$p => _$setProp(_el$32, "fg", theme.text.feedback.warning.base, _$p));
-                  return _el$32;
+                  var _el$33 = _$createElement("text");
+                  _$setProp(_el$33, "wrapMode", "none");
+                  _$insert(_el$33, () => fit(ASK_HINT, SIDEBAR_COLUMNS));
+                  _$effect(_$p => _$setProp(_el$33, "fg", theme.text.feedback.warning.base, _$p));
+                  return _el$33;
                 }
               })];
             }
@@ -1318,14 +1425,14 @@ export default Plugin.define({
           _$effect(_p$ => {
             var _v$ = theme.text.base,
               _v$2 = theme.text.base;
-            _v$ !== _p$.e && (_p$.e = _$setProp(_el$24, "fg", _v$, _p$.e));
-            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$25, "fg", _v$2, _p$.t));
+            _v$ !== _p$.e && (_p$.e = _$setProp(_el$25, "fg", _v$, _p$.e));
+            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$26, "fg", _v$2, _p$.t));
             return _p$;
           }, {
             e: undefined,
             t: undefined
           });
-          return _el$22;
+          return _el$23;
         })()
       });
     }

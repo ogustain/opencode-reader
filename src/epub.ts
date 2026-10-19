@@ -159,7 +159,8 @@ function element(xml: string, local: string): string | undefined {
   return text || undefined
 }
 
-function resolveHref(base: string, href: string): string {
+/** Archive path of `href` (its fragment dropped) relative to folder `base`. */
+export function resolveHref(base: string, href: string): string {
   let path = href.split("#")[0]
   try {
     path = decodeURIComponent(path)

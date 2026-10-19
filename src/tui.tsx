@@ -20,17 +20,17 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
 import type { OnyxState } from "./onyx"
 import {
-  booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen,
+  booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextScreen, notesBetween, previousScreen,
   progressOf, savedFinish, savedTimes, screenAt, turnForward, type Display, type Position,
 } from "./paginate"
 import {
-  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type OpenResult,
+  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type NoteResult, type OpenResult,
   type PullResult, type PushResult, type SyncSettings,
 } from "./rpc"
 import {
   batchSummary, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE, type TreeNode,
 } from "./sync"
-import type { Paragraph } from "./text"
+import { noteBlock, type Paragraph } from "./text"
 
 const PANEL = "opencode-reader"
 const SIDEBAR_COLUMNS = 37
@@ -769,6 +769,37 @@ export default Plugin.define({
         const paragraphs = await ensureChapter(b, previous)
         await goTo({ spine: previous, offset: lastScreen(paragraphs ? wrap(paragraphs) : [], height()) })
       }
+      // The notes of the screen shown (`n`), over the text until closed; the position does not move.
+      const [notesView, setNotesView] = createSignal<{ key: string; paragraphs: Paragraph[]; top: number }>()
+      const notes = () => (notesView()?.key === book()?.key ? notesView() : undefined)
+      const noteLines = createMemo(() => layout(notes()?.paragraphs ?? [], textColumn().width))
+      const noteCache = new Map<string, string>()
+      const noteOf = async (b: Book, href: string) => {
+        const known = noteCache.get(`${b.key}#${href}`)
+        if (known !== undefined) return known
+        const result = (await reader.note({ path: b.path, href }).catch((e) => ({ ok: false, error: failure(e) }))) as NoteResult
+        if (!result.ok) return `(${result.error})`
+        noteCache.set(`${b.key}#${href}`, result.text)
+        return result.text
+      }
+      const showNotes = async () => {
+        const b = book()
+        const c = chapter()
+        if (!b || !c || !ready()) return
+        const from = lines()[screen().first]?.start ?? 0
+        const refs = notesBetween(c.paragraphs, from, nextScreen(lines(), height(), position().offset) ?? Infinity)
+        if (refs.length === 0) return toast("No notes on this page")
+        const view = { key: b.key, paragraphs: refs.map((r) => ({ text: `${r.label} …` })), top: 0 }
+        setNotesView(view)
+        const texts = await Promise.all(refs.map((r) => noteOf(b, r.href)))
+        // Still this view (scrolled or not): its texts replace the placeholders.
+        const v = notesView()
+        if (v?.paragraphs === view.paragraphs) setNotesView({ ...v, paragraphs: refs.map((r, i) => ({ text: noteBlock(r.label, texts[i]) })) })
+      }
+      const scrollNotes = (by: number) => {
+        const v = notes()
+        if (v) setNotesView({ ...v, top: Math.max(0, Math.min(v.top + by, noteLines().length - height())) })
+      }
       const withDialog = async (show: () => Promise<void>) => {
         if (dialogOpen()) return
         setDialogOpen(true)
@@ -816,15 +847,27 @@ export default Plugin.define({
 
       context.keymap.layer(() => ({
         priority: 10,
-        enabled: () => props.panel.focused && !dialogOpen(),
+        enabled: () => props.panel.focused && !dialogOpen() && !notes(),
         commands: [
           // Space is a silent alias of → (not in the hint line).
           { title: "Next page", group: "Reader", bind: "right,space", run: () => void nextPage() },
           { title: "Previous page", group: "Reader", bind: "left", run: () => void previousPage() },
           { title: "Contents", group: "Reader", bind: "t", run: () => void showContents() },
+          { title: "Notes of this page", group: "Reader", bind: "n", run: () => void showNotes() },
           { title: "Display settings", group: "Reader", bind: "s", run: () => void showSettings() },
           { title: "Full screen", group: "Reader", bind: "f", run: () => props.panel.toggleFullscreen() },
           { title: "Close the book", group: "Reader", bind: "q,escape", run: () => props.panel.close() },
+        ],
+      }))
+      context.keymap.layer(() => ({
+        priority: 10,
+        enabled: () => props.panel.focused && !dialogOpen() && !!notes(),
+        commands: [
+          { title: "Scroll the notes down", group: "Reader", bind: "down", run: () => scrollNotes(1) },
+          { title: "Scroll the notes up", group: "Reader", bind: "up", run: () => scrollNotes(-1) },
+          { title: "Next page of notes", group: "Reader", bind: "right,space", run: () => scrollNotes(height()) },
+          { title: "Previous page of notes", group: "Reader", bind: "left", run: () => scrollNotes(-height()) },
+          { title: "Back to the text", group: "Reader", bind: "n,q,escape", run: () => setNotesView(undefined) },
         ],
       }))
       // Closing the panel sends the position to the Boox.
@@ -866,14 +909,29 @@ export default Plugin.define({
                     if (this.height > 1) setHeight(this.height - 1)
                   }}
                 >
-                  <Show when={chapter()} fallback={<text fg={theme.text.muted}>Loading…</text>}>
-                    <Index each={screen().lines}>
-                      {(line) => (
-                        <text height={1} wrapMode="none" fg={theme.text.base}>
-                          {line().heading ? <b>{line().text || " "}</b> : line().text || " "}
-                        </text>
-                      )}
-                    </Index>
+                  <Show
+                    when={notes()}
+                    fallback={
+                      <Show when={chapter()} fallback={<text fg={theme.text.muted}>Loading…</text>}>
+                        <Index each={screen().lines}>
+                          {(line) => (
+                            <text height={1} wrapMode="none" fg={theme.text.base}>
+                              {line().heading ? <b>{line().text || " "}</b> : line().text || " "}
+                            </text>
+                          )}
+                        </Index>
+                      </Show>
+                    }
+                  >
+                    {(v) => (
+                      <Index each={noteLines().slice(v().top, v().top + height())}>
+                        {(line) => (
+                          <text height={1} wrapMode="none" fg={theme.text.base}>
+                            {line().text || " "}
+                          </text>
+                        )}
+                      </Index>
+                    )}
                   </Show>
                 </box>
                 <box flexDirection="row" gap={2} height={1}>
@@ -896,7 +954,10 @@ export default Plugin.define({
                 </box>
                 {/* Always one line, focused or not: the text area's height must not depend on focus. */}
                 <text height={1} wrapMode="none" fg={props.panel.focused ? theme.text.base : theme.text.muted}>
-                  {fit(props.panel.focused ? "←/→ page · t contents · s settings · f fullscreen · q close" : "click to read", width())}
+                  {fit(
+                    !props.panel.focused ? "click to read" : notes() ? "Notes · ↑/↓ scroll · ←/→ page · n/q back" : "←/→ page · t contents · n notes · s settings · f fullscreen · q close",
+                    width(),
+                  )}
                 </text>
               </>
             )}

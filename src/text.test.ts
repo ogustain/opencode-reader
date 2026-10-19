@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { attributes, chapterLength, decodeEntities, xhtmlToParagraphs } from "./text.ts"
+import { attributes, chapterLength, decodeEntities, noteBlock, noteText, xhtmlToParagraphs } from "./text.ts"
 
 test("decodes named and numeric entities, leaves unknown ones", () => {
   assert.equal(decodeEntities("&eacute;t&eacute; &amp; &#8217;&#x2014;&hellip; &laquo;x&raquo; &bogus; &#xZZ;"), "été & ’—… «x» &bogus; &#xZZ;")
@@ -45,9 +45,38 @@ test("text outside block tags still forms a paragraph; NFC normalized", () => {
 
 test("<sup> and <sub> text in Unicode forms, one for one; a run with a character lacking one unchanged", () => {
   const note = '<span class="calibre14"><a class="sdfootnoteanc" href="../Text/n.html#sdfootnote11sym" id="sdfootnote11anc"><sup>11</sup></a></span>'
-  assert.deepEqual(xhtmlToParagraphs(`<body><p><span>Marie</span><sup class="calibre13">${note}</sup>, dit-il.</p></body>`), [{ text: "Marie¹¹, dit-il." }])
+  assert.deepEqual(xhtmlToParagraphs(`<body><p><span>Marie</span><sup class="calibre13">${note}</sup>, dit-il.</p></body>`).map((p) => p.text), ["Marie¹¹, dit-il."])
   assert.deepEqual(xhtmlToParagraphs("<body><p>XIX<sup>e</sup> siècle, H<sub>2</sub>O, 1<sup>er</sup></p></body>"), [{ text: "XIXᵉ siècle, H₂O, 1ᵉʳ" }])
   assert.deepEqual(xhtmlToParagraphs("<body><p>M<sup>me</sup>, x<sup>2a</sup>, n<sub>e</sub></p></body>"), [{ text: "Mme, x2a, ne" }])
+})
+
+test("note references: an <a> to a fragment inside <sup> or marked noteref, the text unchanged", () => {
+  const calibre =
+    '<sup class="calibre13"><span class="calibre14"><a class="sdfootnoteanc" href="../Text/notes.html#sdfootnote11sym" id="sdfootnote11anc"><sup>11</sup></a></span></sup>'
+  assert.deepEqual(xhtmlToParagraphs(`<body><p>  Dit <span>Paul</span>${calibre}, puis.</p></body>`), [
+    { text: "Dit Paul¹¹, puis.", notes: [{ at: 8, label: "¹¹", href: "../Text/notes.html#sdfootnote11sym" }] },
+  ])
+  const epub3 = '<body><p>Un mot<a epub:type="noteref" href="#n1">1</a> et<br/>un autre<sup><a href="#n2">2</a></sup>.</p></body>'
+  assert.deepEqual(xhtmlToParagraphs(epub3), [
+    { text: "Un mot1 et\nun autre².", notes: [{ at: 6, label: "1", href: "#n1" }, { at: 19, label: "²", href: "#n2" }] },
+  ])
+  // No fragment, an external link, or a plain link: not notes.
+  const links = '<body><p>a<sup><a href="../Text/x.html">2</a></sup> b<sup><a href="http://example.org/#x">3</a></sup> c<a href="#x">4</a></p></body>'
+  assert.deepEqual(xhtmlToParagraphs(links), [{ text: "a² b³ c4" }])
+})
+
+test("a note's text: the element with the id, or the block around an inline one", () => {
+  const notes =
+    '<html><body><div class="calibre3" id="sdfootnote11"><p class="sdfootnote-western"><a class="sdfootnotesym-western" href="../Text/ch.html#sdfootnote11anc" id="sdfootnote11sym">11</a> Voir la lettre du <i>3 mai</i>.</p></div>' +
+    '<aside epub:type="footnote" id="n1"><p>1. Première note.</p><p>Suite.</p></aside><p>Fin.</p></body></html>'
+  assert.equal(noteText(notes, "sdfootnote11sym"), "11 Voir la lettre du 3 mai.")
+  assert.equal(noteText(notes, "sdfootnote11"), "11 Voir la lettre du 3 mai.")
+  assert.equal(noteText(notes, "n1"), "1. Première note.\nSuite.")
+  assert.equal(noteText(notes, "missing"), undefined)
+  // Shown after its label, without the number it starts with.
+  assert.equal(noteBlock("¹¹", "11 Voir la lettre du 3 mai."), "¹¹ Voir la lettre du 3 mai.")
+  assert.equal(noteBlock("¹", "1. Première note."), "¹ Première note.")
+  assert.equal(noteBlock("¹", "12 mai."), "¹ 12 mai.")
 })
 
 test("chapter length counts each paragraph plus a separator", () => {

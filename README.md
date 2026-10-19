@@ -85,6 +85,7 @@ Keys in the panel (click it to focus it):
 | --- | --- |
 | `←` `→` | Previous / next page (`space` also turns forward) |
 | `t` | Contents; picking a chapter jumps to its start |
+| `n` | Notes referenced on this page (`↑` `↓` `←` `→` scroll, `n` `q` `Esc` back) |
 | `s` | Display settings |
 | `f` | Full screen |
 | `q` `Esc` | Close the book |
@@ -254,7 +255,7 @@ prepares git installs by running a full `npm install`, which fails.
   so it also works with a remote OpenCode server.
 - `src/tui.tsx`: picker, panel, sidebar and keys, compiled to `dist/tui.js`.
 - `src/epub.ts` (ZIP on `node:zlib`, OPF, table of contents), `src/text.ts`
-  (XHTML → paragraphs), `src/paginate.ts` (wrapping, pages, position ↔ %),
+  (XHTML → paragraphs, note references and texts), `src/paginate.ts` (wrapping, pages, position ↔ %),
   `src/adb.ts`, `src/library.ts`, `src/onyx.ts` (cloud client),
   `src/sources.ts` (cloud then ADB), `src/neoposition.ts` (NeoReader
   positions), `src/sync.ts` (collection tree, pull/push decisions).

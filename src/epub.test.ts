@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
 import { bufferSource, decodeXml, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
-import { bookKey, buildIndex, cacheFile, neoRefs, readChapter, readChapterMap, readMeta, scanEpubs, within } from "./library.ts"
+import { bookKey, buildIndex, cacheFile, MAX_NOTE, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
 /** `size` / `compressed` override the sizes declared in the central directory (malformed archives). */
@@ -85,13 +85,13 @@ const ncx = `<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/nc
 const chapter = (title: string, body: string) =>
   `<?xml version="1.0"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>x</title><style>p{}</style></head><body><h1>${title}</h1>${body}</body></html>`
 
-function sampleEpub(extra: Array<{ name: string; data: string }> = []): Buffer {
+function sampleEpub(extra: Array<{ name: string; data: string }> = [], one = "<p>First paragraph.</p><p>Second &amp; last.</p>"): Buffer {
   return zip([
     { name: "mimetype", data: "application/epub+zip", store: true },
     { name: "META-INF/container.xml", data: container },
     { name: "OEBPS/content.opf", data: opf },
     { name: "OEBPS/cover.xhtml", data: chapter("", `<img src="img/a.png"/>`).replace("<h1></h1>", "") },
-    { name: "OEBPS/text/ch1.xhtml", data: chapter("One", "<p>First paragraph.</p><p>Second &amp; last.</p>"), store: true },
+    { name: "OEBPS/text/ch1.xhtml", data: chapter("One", one), store: true },
     { name: "OEBPS/text/ch 2.xhtml", data: chapter("Two", "<p>" + "word ".repeat(200) + "</p>") },
     { name: "OEBPS/style.css", data: "p{}" },
     { name: "OEBPS/toc.ncx", data: ncx },
@@ -232,6 +232,24 @@ test("library: index with chapter lengths and headings, one chapter at a time", 
   assert.ok(within(path, [dir]))
   assert.ok(!within("/etc/passwd", [dir]))
   assert.ok(!within(`${dir}-other/x.epub`, [dir]))
+})
+
+test("library: note targets resolve inside the book, their text is read from the target file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  const path = join(dir, "book.epub")
+  const one = '<p>Un mot<sup><a href="../notes/n.xhtml#sdfootnote1sym">1</a></sup> et un autre<a epub:type="noteref" href="#n2">2</a>.</p><aside epub:type="footnote" id="n2"><p>2. Note sur place.</p></aside>'
+  const notes = chapter("Notes", '<div id="sdfootnote1"><p><a href="../text/ch1.xhtml#a1" id="sdfootnote1sym">1</a> Une note.</p></div>' + `<p id="long">${"x".repeat(MAX_NOTE + 10)}</p>`)
+  await writeFile(path, sampleEpub([{ name: "OEBPS/notes/n.xhtml", data: notes }], one))
+  const [first] = readChapter(path, 1)[1].notes!
+  const second = readChapter(path, 1)[1].notes![1]
+  assert.deepEqual([first.href, second.href], ["OEBPS/notes/n.xhtml#sdfootnote1sym", "OEBPS/text/ch1.xhtml#n2"])
+  assert.equal(readNote(path, first.href), "1 Une note.")
+  assert.equal(readNote(path, second.href), "2. Note sur place.")
+  assert.equal(readNote(path, "OEBPS/notes/n.xhtml#long"), `${"x".repeat(MAX_NOTE)}…`)
+  assert.throws(() => readNote(path, "OEBPS/notes/n.xhtml#missing"), /note #missing not found/)
+  assert.throws(() => readNote(path, "OEBPS/nowhere.xhtml#a"), /not in the book/)
+  for (const escape of ["../outside.xhtml#a", "OEBPS/../../outside.xhtml#a", "/etc/passwd#a"]) assert.throws(() => readNote(path, escape), /outside the book/)
+  assert.throws(() => readNote(path, "OEBPS/notes/n.xhtml"), /not a note link/)
 })
 
 test("library: keys and cache names are stable and path-safe", () => {

@@ -5,7 +5,12 @@
  * documents are well-formed XHTML, which keeps a tag scanner sufficient.
  */
 
-export type Paragraph = { text: string; heading?: true }
+/**
+ * A note reference: where its label starts in the paragraph text, the label,
+ * and its target (`file#id` as written; the chapter reader resolves it).
+ */
+export type NoteRef = { at: number; label: string; href: string }
+export type Paragraph = { text: string; heading?: true; notes?: NoteRef[] }
 
 /** HTML 4 Latin-1 entities, code points 160–255 in order. */
 const LATIN1 =
@@ -75,19 +80,37 @@ export function xhtmlToParagraphs(xhtml: string): Paragraph[] {
   let current = ""
   let heading = 0
   const depth = { sup: 0, sub: 0 }
+  // Note references: a marker where each label starts, its offset read once whitespace is collapsed.
+  const markable = !html.includes(NOTE)
+  let notes: Array<{ label: string; href: string }> = []
+  let anchor: { label: string; href: string } | undefined
   const flush = () => {
-    const text = clean(current)
-    if (text) paragraphs.push(heading > 0 ? { text, heading: true } : { text })
+    const text = clean(current.replaceAll(NOTE, ""))
+    if (text) paragraphs.push({ text, ...(heading > 0 ? { heading: true as const } : {}), ...(notes.length ? noteRefs(clean(current), text, notes) : {}) })
     current = ""
+    notes = []
+    anchor = undefined
   }
   for (const m of html.matchAll(/<(\/?)([A-Za-z][\w:-]*)[^>]*?(\/?)>|([^<]+)/g)) {
     if (m[4] !== undefined) {
       const tag = depth.sup > 0 ? "sup" : depth.sub > 0 ? "sub" : undefined
-      current += tag ? raise(m[4], FORMS[tag]) : m[4]
+      const run = tag ? raise(m[4], FORMS[tag]) : m[4]
+      current += run
+      if (anchor) anchor.label += run
       continue
     }
     const name = m[2].toLowerCase().replace(/^.*:/, "")
     if ((name === "sup" || name === "sub") && !m[3]) depth[name] = Math.max(0, depth[name] + (m[1] ? -1 : 1))
+    if (name === "a" && !m[3]) {
+      const a = m[1] ? {} : attributes(m[0])
+      const href = a.href ?? ""
+      const note = markable && /#./.test(href) && !/^(?:[a-z][\w+.-]*:|\/\/)/i.test(href) && (depth.sup > 0 || /\bnoteref\b/.test(a["epub:type"] ?? ""))
+      anchor = note ? { label: "", href } : undefined
+      if (anchor) {
+        notes.push(anchor)
+        current += NOTE
+      }
+    }
     if (name === "br") {
       current += BREAK
       continue
@@ -102,6 +125,54 @@ export function xhtmlToParagraphs(xhtml: string): Paragraph[] {
 
 /** Marks a `<br>` until whitespace is collapsed (source newlines are not breaks). */
 const BREAK = "\u0000"
+/** Marks where a note label starts (not valid XML text: never in a book's own). */
+const NOTE = "\u0001"
+
+/** The notes of a paragraph at their offsets in `text`, from its cleaned text with markers; none when they disagree. */
+function noteRefs(marked: string, text: string, notes: Array<{ label: string; href: string }>): { notes?: NoteRef[] } {
+  const at: number[] = []
+  for (let i = 0; i < marked.length; i++) if (marked[i] === NOTE) at.push(i - at.length)
+  if (at.length !== notes.length || marked.replaceAll(NOTE, "") !== text) return {}
+  return { notes: notes.map((n, i) => ({ at: at[i], label: clean(n.label), href: n.href })) }
+}
+
+/** A note as shown: its label, then its text without the number it starts with (the back link). */
+export function noteBlock(label: string, text: string): string {
+  const number = lowered(label).trim()
+  const body = number && text.startsWith(number) && !/[\p{L}\p{N}]/u.test(text[number.length] ?? "") ? text.slice(number.length).replace(/^[\s.)\]]+/, "") : text
+  return `${label} ${body}`
+}
+
+const NOTE_BLOCKS = new Set(["p", "div", "aside", "li"])
+const VOID = new Set(["br", "img", "hr", "meta", "link", "input", "col", "area", "base", "wbr", "source", "embed", "param", "track"])
+
+/**
+ * Text of the note with this id in a document: the element, or its nearest
+ * p/div/aside/li when it is inline, as paragraphs joined by newlines.
+ * Undefined when no element has the id.
+ */
+export function noteText(xhtml: string, id: string): string | undefined {
+  const stack: Array<{ name: string; at: number }> = []
+  let target: { depth: number; at: number } | undefined
+  const render = (end: number) => xhtmlToParagraphs(`<body>${xhtml.slice(target!.at, end)}</body>`).map((p) => p.text).join("\n")
+  for (const m of xhtml.matchAll(/<(\/?)([A-Za-z][\w:.-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g)) {
+    const name = m[2].toLowerCase().replace(/^.*:/, "")
+    if (m[1]) {
+      const open = stack.findLastIndex((f) => f.name === name)
+      if (open >= 0) stack.length = open
+      if (target && stack.length <= target.depth) return render(m.index + m[0].length)
+      continue
+    }
+    const empty = !!m[4] || VOID.has(name)
+    if (!target && attributes(m[3]).id === id) {
+      const block = NOTE_BLOCKS.has(name) ? -1 : stack.findLastIndex((f) => NOTE_BLOCKS.has(f.name))
+      target = block >= 0 ? { depth: block, at: stack[block].at } : { depth: stack.length, at: m.index }
+      if (empty && block < 0) return render(m.index + m[0].length)
+    }
+    if (!empty) stack.push({ name, at: m.index })
+  }
+  return target ? render(xhtml.length) : undefined
+}
 
 /** Collapses markup whitespace, keeps `<br>` breaks and no-break spaces. */
 function clean(raw: string): string {

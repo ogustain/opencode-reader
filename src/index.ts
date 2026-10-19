@@ -20,7 +20,7 @@ import { Plugin } from "@opencode/plugin"
 import { resolve } from "node:path"
 import { createAdb, type BooxBook } from "./adb.ts"
 import {
-  bookKey, buildIndex, cacheFile, defaultCacheDir, expandHome, fileStamp, neoRefs, readChapter, readChapterMap, readMeta, scanEpubs,
+  bookKey, buildIndex, cacheFile, defaultCacheDir, expandHome, fileStamp, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs,
   within, type BookIndex,
 } from "./library.ts"
 import type { ChapterMap } from "./neoposition.ts"
@@ -31,7 +31,7 @@ import {
   type OnyxState,
 } from "./onyx.ts"
 import {
-  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type OpenResult, type PullResult,
+  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type NoteResult, type OpenResult, type PullResult,
   type PushResult,
 } from "./rpc.ts"
 import {
@@ -347,6 +347,16 @@ export default Plugin.define({
         if (typeof spine !== "number" || !Number.isInteger(spine) || spine < 0) return { ok: false, error: "invalid chapter" }
         try {
           return { ok: true, paragraphs: readChapter(path, spine) }
+        } catch (error) {
+          return { ok: false, error: message(error) }
+        }
+      },
+      note: async (input): Promise<NoteResult> => {
+        const { path, href } = (input ?? {}) as { path?: string; href?: string }
+        if (typeof path !== "string" || !within(path, roots)) return { ok: false, error: "book outside the reader folders" }
+        if (typeof href !== "string") return { ok: false, error: "invalid note link" }
+        try {
+          return { ok: true, text: readNote(path, href) }
         } catch (error) {
           return { ok: false, error: message(error) }
         }

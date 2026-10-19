@@ -6,12 +6,12 @@
 import { createHash } from "node:crypto"
 import { readdirSync, realpathSync, statSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
-import { basename, join, resolve, sep } from "node:path"
-import { decodeXml, fileSource, openZip, readPackage, type Zip } from "./epub.ts"
+import { basename, join, posix, resolve, sep } from "node:path"
+import { decodeXml, fileSource, openZip, readPackage, resolveHref, type Zip } from "./epub.ts"
 import { mapChapter, type ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
 import type { NeoRef } from "./sync.ts"
-import { chapterLength, xhtmlToParagraphs, type Paragraph } from "./text.ts"
+import { chapterLength, noteText, xhtmlToParagraphs, type Paragraph } from "./text.ts"
 
 export type BookIndex = { title: string; author?: string; chapters: Array<{ title?: string; chars: number }> }
 
@@ -144,6 +144,35 @@ export function readChapter(path: string, spine: number): Paragraph[] {
     const pkg = readPackage(zip, fallback(path))
     const doc = pkg.spine[spine]
     if (!doc) throw new Error(`no chapter ${spine}`)
-    return xhtmlToParagraphs(decodeXml(zip.read(doc), doc))
+    const paragraphs = xhtmlToParagraphs(decodeXml(zip.read(doc), doc))
+    // Note targets as archive paths (`file#id`), for `readNote`.
+    const dir = posix.dirname(doc) === "." ? "" : posix.dirname(doc)
+    for (const p of paragraphs)
+      for (const n of p.notes ?? []) n.href = n.href.startsWith("#") ? doc + n.href : resolveHref(dir, n.href) + n.href.slice(n.href.indexOf("#"))
+    return paragraphs
+  })
+}
+
+/** Longest note text returned (characters). */
+export const MAX_NOTE = 8000
+
+/** Text of the note at `href` (`file#id`, an archive path), capped at `MAX_NOTE`. Throws when it is not in the book. */
+export function readNote(path: string, href: string): string {
+  const hash = href.indexOf("#")
+  const file = posix.normalize(href.slice(0, Math.max(0, hash)))
+  let id = href.slice(hash + 1)
+  try {
+    id = decodeURIComponent(id)
+  } catch {
+    // Keep the raw id.
+  }
+  if (hash < 0 || !id) throw new Error("not a note link")
+  if (file === ".." || file.startsWith("../") || posix.isAbsolute(file)) throw new Error("note outside the book")
+  return withZip(path, (zip) => {
+    readPackage(zip, fallback(path)) // A protected book is refused here too.
+    if (!zip.has(file)) throw new Error(`note file not in the book: ${file}`)
+    const text = noteText(decodeXml(zip.read(file), file), id)
+    if (text === undefined) throw new Error(`note #${id} not found`)
+    return text.length > MAX_NOTE ? `${text.slice(0, MAX_NOTE)}…` : text
   })
 }

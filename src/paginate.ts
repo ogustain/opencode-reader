@@ -8,7 +8,7 @@
  * re-wraps: the first character shown stays on the top line, and the position
  * itself never moves without a page turn.
  */
-import type { Paragraph } from "./text.ts"
+import type { NoteRef, Paragraph } from "./text.ts"
 
 export type Position = { spine: number; offset: number }
 /** A wrapped line; `start` is the offset of its first character (for a blank line, the newline before the next text). */
@@ -117,6 +117,17 @@ export function screenAt(lines: readonly Line[], height: number, offset: number)
   const first = lineAt(lines, offset)
   const page = Math.ceil(first / h)
   return { first, lines: lines.slice(first, first + h), page, pages: page + Math.max(1, Math.ceil((lines.length - first) / h)) }
+}
+
+/** Note references of a chapter from offset `from` to before `to` (chapter offsets), in order, each target once. */
+export function notesBetween(paragraphs: readonly Paragraph[], from: number, to: number): NoteRef[] {
+  const out: NoteRef[] = []
+  let base = 0
+  for (const p of paragraphs) {
+    for (const n of p.notes ?? []) if (base + n.at >= from && base + n.at < to && !out.some((o) => o.href === n.href)) out.push({ ...n, at: base + n.at })
+    base += p.text.length + 1
+  }
+  return out
 }
 
 /** Offset of the next screen in the chapter, undefined on its last screen. */
