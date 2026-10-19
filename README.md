@@ -177,22 +177,24 @@ matched with the BOOX library).
 
 - **BOOX → OpenCode.** Opening a book, and opening the panel, read the book's
   cloud record (never on a timer; opening the panel at most once a minute per
-  book, opening a book every time). When the
-  BOOX saved or opened the book after your last page turn here, the book
-  jumps to the BOOX position, to the character, and a toast says so.
+  book, opening a book every time). When the BOOX read the book further
+  since the two sides last agreed (see below), the book jumps to the BOOX
+  position, to the character, and a toast says so.
 - **OpenCode → BOOX.** Closing the panel, switching books, or
-  `pushIdleMinutes` without a page turn send the position, but only when your
-  last page turn here is newer than the BOOX's last save and the position
-  changed. A send that failed or was cut short (OpenCode quit meanwhile) is
-  tried again once at the next start or panel opening. On the BOOX, open the
+  `pushIdleMinutes` without a page turn send the position, but only when you
+  moved here since the two sides last agreed. A send that failed or was cut
+  short (OpenCode quit meanwhile) is offered again once at the next start or
+  panel opening, through the same decision (if the BOOX read further
+  meanwhile, its position is taken instead). On the BOOX, open the
   book and **accept the sync pop-up**: NeoReader jumps to the OpenCode
   position.
-- **Who is newer.** The plugin remembers the cloud record's revision at each
-  read and write. If the record has not changed since (or holds the
-  plugin's own write), any page turned here since wins, whatever the BOOX's
-  clock says. If the BOOX saved since **and** you turned pages here too, it
-  is a real conflict: the most recent of the two times wins (BOOX clock
-  against this computer's clock).
+- **Who is newer.** The plugin remembers, per book, the last reading both
+  sides agreed on: the cloud's position and progress, and a local counter
+  bumped by every move here. Opening the book on the BOOX without reading
+  changes neither. When only one side moved since, it wins, whatever the
+  clocks say; the plugin's own writes count as agreed. If the BOOX read on
+  **and** you turned pages here too, it is a real conflict: the most recent
+  of the two times wins (BOOX clock against this computer's clock).
 
 Protocol details for contributors are in
 [docs/onyx-cloud.md](docs/onyx-cloud.md).
@@ -228,7 +230,8 @@ Protocol details for contributors are in
   `progress`, the update time, `device_model: "OpenCode"` and `updatedAt`).
   Before each write, the record as it was is saved to
   `<dataDir>/onyx-backups.json` (the last 20, file mode 0600), and the
-  write itself is noted in `<dataDir>/onyx-sync.json` (to recognise it later).
+  write itself is noted in `<dataDir>/onyx-sync.json` (to recognise it
+  later), with the last agreed reading per book.
 - **What is never written:** collections, memberships, annotations, notes,
   files in the cloud storage, and anything on the device. Nothing is ever
   deleted. ADB is read-only: it lists the library and copies book files,
