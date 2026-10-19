@@ -17,7 +17,7 @@
  * Only GET and PUT exist here, and PUT only accepts book docs (modeType 4).
  */
 import { createHash, createHmac, randomBytes } from "node:crypto"
-import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs"
+import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { defaultDataDir } from "./paths.ts"
 import { EXPIRED_MESSAGE, type CloudMark } from "./sync.ts"
@@ -199,16 +199,18 @@ export function readPrivateFile(file: string): string | undefined {
 
 /**
  * Replaces `file` with `content` in one step: a new 0600 temp file in the same
- * folder (0700 when created), flushed to disk, then renamed over it. A crash
- * leaves the old content or the new one, never a mix.
+ * folder (0700 when created), written whole and flushed to disk, renamed over
+ * it, then the folder flushed (the rename itself). A crash leaves the old
+ * content or the new one, never a mix.
  */
 export function writePrivateFile(file: string, content: string): void {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  const temp = join(dirname(file), `.${basename(file)}.${randomBytes(6).toString("hex")}.tmp`)
+  const dir = dirname(file)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const temp = join(dir, `.${basename(file)}.${randomBytes(6).toString("hex")}.tmp`)
   const fd = openSync(temp, "wx", 0o600)
   try {
     try {
-      writeSync(fd, content)
+      writeFileSync(fd, content) // Loops until every byte is written.
       fsyncSync(fd)
     } finally {
       closeSync(fd)
@@ -217,6 +219,25 @@ export function writePrivateFile(file: string, content: string): void {
   } catch (error) {
     rmSync(temp, { force: true })
     throw error
+  }
+  syncDir(dir)
+}
+
+/** Flushes a folder's entries to disk; some platforms refuse to fsync a folder (EISDIR, EINVAL, EPERM): skipped there. */
+function syncDir(dir: string): void {
+  let fd: number
+  try {
+    fd = openSync(dir, "r")
+  } catch {
+    return
+  }
+  try {
+    fsyncSync(fd)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== "EISDIR" && code !== "EINVAL" && code !== "EPERM") throw error
+  } finally {
+    closeSync(fd)
   }
 }
 

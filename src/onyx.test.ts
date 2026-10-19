@@ -430,6 +430,10 @@ test("private files are replaced whole, 0600, with no temp file left", () => {
   assert.equal(readFileSync(file, "utf8"), "two")
   assert.equal(statSync(file).mode & 0o777, 0o600) // A new file, not the old 0644 one rewritten.
   assert.deepEqual(readdirSync(dir), ["session"])
+  // Large content is written whole (multi-byte characters included).
+  const big = "é".repeat(3_000_000)
+  writePrivateFile(file, big)
+  assert.equal(readFileSync(file, "utf8"), big)
   // A failed write leaves the old content and no temp file.
   assert.throws(() => writePrivateFile(join(file, "below"), "x"))
   assert.deepEqual(readdirSync(dir), ["session"])
