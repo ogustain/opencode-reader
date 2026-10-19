@@ -5,7 +5,8 @@ panel while your agents work. Add your books, and it remembers each one's
 position to the character.
 
 - Add an EPUB file or a whole folder with `/add <path>`, or from "Add books…"
-  in `/read` (you can drag the file into the terminal).
+  in `/read` (you can drag the file into the terminal): it is moved into the
+  reader's own library.
 - Text-only reading, with contents, notes and display settings.
 - Optional: keep your place in sync with a BOOX e-reader (stock NeoReader
   app) in both directions through the Onyx cloud, and open the books of your
@@ -48,8 +49,8 @@ server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `dir` | `~/Books` | Folder of your EPUB files, searched three levels deep; books you add are copied here |
-| `dataDir` | `$XDG_DATA_HOME/opencode-reader`, else `~/.local/share/opencode-reader` | Book cache, settings, Onyx token, sync session and push backups |
+| `dir` | `~/Books` | Extra folder of your own EPUBs, read if it exists (three levels deep); never created or changed |
+| `dataDir` | `$XDG_DATA_HOME/opencode-reader`, else `~/.local/share/opencode-reader` | The reader's library (`library/`, where added books are moved), book cache, settings, Onyx token, sync session and push backups |
 | `server` | the region chosen when connecting (`<dataDir>/settings.json`), else `"eur"` | Onyx account region: `"eur"` or `"us"`; when set, it wins over the one chosen |
 | `tokenFile` | `<dataDir>/onyx-token` | File holding the Onyx token |
 | `pushIdleMinutes` | `5` | Send the position after this many minutes without a page turn |
@@ -59,23 +60,36 @@ server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
 ## Read
 
 - `/read` (palette: "Reader: my books"): pick a book, most recent first,
-  from `dir` and from the books already fetched from the BOOX. It opens at
-  your last position.
+  from the reader's library, from `dir` and from the books already fetched
+  from the BOOX. It opens at your last position.
 - `/add <path>` (palette: "Reader: add books"): adds that EPUB file or
   folder. `/add` alone, the palette command and **Add books…** (always first
   in `/read`) ask for the path: type it, or drag the file or folder into the
   terminal.
+  - Books are **moved** into the reader's library, `<dataDir>/library`
+    (by default `~/.local/share/opencode-reader/library`; folder 0700, files
+    0600). A single book opens at once; a book already there opens its copy.
   - A folder adds its EPUBs three levels deep, at most 500 files at a time.
-  - Books are copied into `dir` (created if missing). A single book opens at
-    once; a book already there opens its copy in `dir`.
-  - A toast sums up: "2 added · 1 already there · 1 refused (DRM)".
+    Folders are never removed, even once emptied; refused files stay.
+  - A toast sums up: "2 moved to the library · 1 already there · 1 refused
+    (DRM)".
   - A book is added only if it opens as for reading: not an EPUB, protected
     (DRM), unreadable or over 512 MiB is refused.
-  - Nothing is ever overwritten: a book identical to one in `dir` (same size
-    and content), or a file already in `dir`, is "already there"; another
-    book with the same file name is copied as `name (2).epub`.
+  - The move is a copy first: the file is read once, the copy is checked,
+    then published under a free name (`name (2).epub` when the name is
+    taken; nothing is ever overwritten). Your file is removed only after
+    that, and only if it is a regular file (not a symbolic link), unchanged
+    since it was read, and the copy in the library has the same size and
+    content. Otherwise it stays, and the toast says "copied; original kept"
+    with the reason.
+  - A book identical (same size and content) to one in the library or in
+    `dir` is not copied again; its file is removed under the same checks:
+    "already in the library (removed from Downloads)".
+  - A file already in the library, `dir` or the BOOX cache is "already
+    there" and never touched.
   - With no books yet, `/read` shows just "Add books…" (and "Connect a
-    BOOX…"). You can also put EPUB files in `dir` yourself.
+    BOOX…"). You can also keep EPUB files in `dir` yourself: they are read
+    in place.
 
 Keys in the panel (click it to focus it):
 
@@ -238,8 +252,8 @@ The BOOX must be awake and unlocked for ADB to answer.
 
 ### How sync works
 
-Sync applies to books opened through `/books` (books from `dir`, added ones
-included, are not matched with the BOOX library).
+Sync applies to books opened through `/books` (added books and books from
+`dir` are not matched with the BOOX library).
 
 - **Automatic when certain, asked otherwise.** If only the BOOX read since
   the last agreement, opening the book or the panel jumps to its position;
