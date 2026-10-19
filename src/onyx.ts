@@ -677,7 +677,7 @@ export function readSettings(file: string): { server?: OnyxServer } {
 /** The region: the `server` option when set, else the saved one (eur when neither). */
 export const onyxServer = (option: unknown, settingsFile: string): unknown => option ?? readSettings(settingsFile).server
 
-/** A token file we may replace: missing, or a plain file (never a symbolic link). */
+/** A token or settings file we may replace: missing, or a plain file (never a symbolic link). */
 function replaceable(file: string): boolean {
   try {
     return lstatSync(file).isFile()
@@ -686,10 +686,22 @@ function replaceable(file: string): boolean {
   }
 }
 
+/** The content of a replaceable file, undefined when it is missing. */
+function previous(file: string): string | undefined {
+  try {
+    return readFileSync(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+}
+
 /**
- * Checks `token` with the Onyx cloud of `server`, then saves it (0600, in one
- * step) and the region, and forgets the old session. A refused token is never
- * written, and the errors never carry it.
+ * Checks `token` with the Onyx cloud of `server`, then saves the region and
+ * the token (0600, each in one step), and forgets the old session. A refused
+ * token is never written, and the errors never carry it. When a write fails,
+ * the files written are put back as they were (removed when they were
+ * missing) and the session is kept: the previous connection still works.
  */
 export async function connectOnyx(
   onyx: Onyx,
@@ -700,7 +712,10 @@ export async function connectOnyx(
   const server = input.server === "eur" || input.server === "us" ? input.server : undefined
   if (!token) return { ok: false, error: "no token" }
   if (!server) return { ok: false, error: "unknown region" }
-  if (!replaceable(files.tokenFile)) return { ok: false, error: `refused: ${basename(files.tokenFile)} is a symbolic link or not a file` }
+  const refused = () => [files.tokenFile, files.settingsFile].find((file) => !replaceable(file))
+  const refusal = (file: string) => ({ ok: false as const, error: `refused: ${basename(file)} is a symbolic link or not a file` })
+  const before = refused()
+  if (before) return refusal(before)
   try {
     await onyx.verify(token, server)
   } catch (error) {
@@ -709,15 +724,32 @@ export async function connectOnyx(
     if (error instanceof OnyxError && error.state === "error") return { ok: false, error: error.message }
     return { ok: false, error: "the Onyx cloud refused this token" }
   }
+  const after = refused()
+  if (after) return refusal(after)
+  // The settings first, then the token: the token decides whether the cloud is used.
+  const writes = [
+    { file: files.settingsFile, content: JSON.stringify({ ...readSettings(files.settingsFile), server }) },
+    { file: files.tokenFile, content: `${token}\n` },
+  ]
+  const tried: Array<{ file: string; old: string | undefined }> = []
   try {
-    if (!replaceable(files.tokenFile)) return { ok: false, error: `refused: ${basename(files.tokenFile)} is a symbolic link or not a file` }
-    writePrivateFile(files.tokenFile, `${token}\n`)
-    writePrivateFile(files.settingsFile, JSON.stringify({ ...readSettings(files.settingsFile), server }))
+    const olds = writes.map(({ file }) => previous(file))
+    writes.forEach(({ file, content }, i) => {
+      tried.push({ file, old: olds[i] })
+      writePrivateFile(file, content)
+    })
   } catch (error) {
+    for (const { file, old } of tried.reverse()) {
+      try {
+        if (old === undefined) rmSync(file, { force: true })
+        else writePrivateFile(file, old)
+      } catch {
+        // A failed write leaves the old content (it is written in one step).
+      }
+    }
     return { ok: false, error: `cannot save the token (${(error as NodeJS.ErrnoException).code ?? "error"})` }
-  } finally {
-    onyx.reset()
   }
+  onyx.reset()
   return { ok: true }
 }
 

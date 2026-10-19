@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -569,6 +569,15 @@ test("connecting refuses a token file that is a symbolic link, before any reques
   assert.equal(cloud.calls.length, 0)
   assert.ok(lstatSync(tokenFile).isSymbolicLink())
   assert.equal(readFileSync(target, "utf8"), "old-token")
+
+  // A settings file that is a symbolic link is refused too.
+  const plain = join(dir, "plain-token")
+  const settingsFile = join(dir, "settings.json")
+  symlinkSync(target, settingsFile)
+  const linked = await connectOnyx(onyx, { token: TOKEN, server: "eur" }, { tokenFile: plain, settingsFile })
+  assert.ok(!linked.ok && /settings\.json is a symbolic link/.test(linked.error))
+  assert.equal(cloud.calls.length, 0)
+  assert.equal(existsSync(plain), false)
 })
 
 test("disconnecting deletes the token and the session, and keeps backups, sync records and settings", async () => {
@@ -666,4 +675,41 @@ test("a library read or a download under way when the BOOX is disconnected keeps
   client = createOnyx({ ...files(), fetch: slow, now: () => NOW })
   await assert.rejects(client.downloadBook(bookDoc(), join(dir, "book.epub")), (e: OnyxError) => e.state === "off")
   assert.deepEqual(readdirSync(dir), [])
+})
+
+test("a connect whose save fails leaves the token, the region and the session as they were", async () => {
+  const session = JSON.stringify({ cookie_name: "SyncGatewaySession", session_id: "old", expires: LATER, server: "https://eurcb.boox.com/neocloud/", token_sha: tokenFingerprint("old-token") })
+  const setup = (where: "settings" | "token", settings: string | null) => {
+    const base = mkdtempSync(join(tmpdir(), "onyx-"))
+    const tokenDir = join(base, "data")
+    const settingsDir = join(base, "config")
+    mkdirSync(tokenDir)
+    mkdirSync(settingsDir)
+    const tokenFile = join(tokenDir, "token")
+    const sessionFile = join(base, "session")
+    const settingsFile = join(settingsDir, "settings.json")
+    writeFileSync(tokenFile, "old-token")
+    writeFileSync(sessionFile, session)
+    if (settings !== null) writeFileSync(settingsFile, settings)
+    // A folder where nothing can be created: that write fails.
+    chmodSync(where === "token" ? tokenDir : settingsDir, 0o500)
+    const cloud = fakeCloud()
+    const onyx = createOnyx({ tokenFile, sessionFile, fetch: cloud.fetch, now: () => NOW })
+    return { tokenFile, sessionFile, settingsFile, onyx, unlock: () => chmodSync(where === "token" ? tokenDir : settingsDir, 0o700) }
+  }
+  const cases: Array<["settings" | "token", string | null]> = [["settings", '{"server":"eur"}'], ["token", '{"server":"eur"}'], ["token", null]]
+  for (const [where, settings] of cases) {
+    const s = setup(where, settings)
+    try {
+      const result = await connectOnyx(s.onyx, { token: TOKEN, server: "us" }, s)
+      assert.ok(!result.ok && /^cannot save the token \(E[A-Z]+\)$/.test(result.error) && !result.error.includes(TOKEN), `${where}: ${JSON.stringify(result)}`)
+      assert.equal(readFileSync(s.tokenFile, "utf8"), "old-token", where)
+      if (settings === null) assert.equal(existsSync(s.settingsFile), false, where)
+      else assert.equal(readFileSync(s.settingsFile, "utf8"), settings, where)
+      assert.equal(readFileSync(s.sessionFile, "utf8"), session, `${where}: the session is kept`)
+      assert.deepEqual(readdirSync(join(s.settingsFile, "..")), settings === null ? [] : ["settings.json"])
+    } finally {
+      s.unlock()
+    }
+  }
 })
