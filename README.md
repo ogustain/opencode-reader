@@ -237,8 +237,12 @@ the sync gateway and its file storage), and only when a token is set.
 npm install
 npm run build:tui     # src/tui.tsx → dist/tui.js
 npm run typecheck
-npm test              # node --experimental-strip-types --test (Node 22.6+)
+npm test              # node --experimental-strip-types --test
 ```
+
+These need Node 22.6 or later (checked on 22.23 and 24.18). `npm install`
+warns `EBADENGINE` because `@opentui/core` asks for Node 26.4: it is only
+installed for its types, so the warning is harmless.
 
 Run `npm run build:tui` after editing `src/tui.tsx` and commit `dist/tui.js`: an
 installed package gets no Solid JSX transform, so it loads the compiled file
