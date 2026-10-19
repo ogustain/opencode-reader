@@ -217,6 +217,8 @@ export default Plugin.define({
     // Pushes of one book doc run one at a time (several windows may push it).
     const docLocks = new Map<string, ReturnType<typeof createLock>>()
     const docLock = (id: string) => docLocks.get(id) ?? docLocks.set(id, createLock()).get(id)!
+    // Adds run one at a time: a book added twice at once is copied once.
+    const addLock = createLock()
     const fetchFile = createFetcher({
       cloud: () =>
         onyx.configured()
@@ -374,7 +376,7 @@ export default Plugin.define({
         if (typeof path !== "string" || !path.trim()) return { added: [], skipped: [{ name: "", reason: "no path" }] }
         const source = resolve(expandHome(path.trim()))
         try {
-          return addBooks(source, dir)
+          return await addLock(() => addBooks(source, dir))
         } catch (error) {
           return { added: [], skipped: [{ name: basename(source), reason: message(error) }] }
         }

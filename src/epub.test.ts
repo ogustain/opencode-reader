@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
 import { bufferSource, decodeXml, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
-import { addBooks, bookKey, buildIndex, cacheFile, copyToTemp, MAX_ADD_FILE, MAX_NOTE, NO_HARD_LINKS, neoRefs, publishCopy, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
+import { addBooks, bookKey, buildIndex, cacheFile, copyToTemp, MAX_ADD_BOOKS, MAX_ADD_FILE, MAX_NOTE, NO_HARD_LINKS, neoRefs, publishCopy, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
 /** `size` / `compressed` override the sizes declared in the central directory (malformed archives). */
@@ -354,7 +354,7 @@ test("adding books: a valid file is copied 0600 into a folder created when missi
   const dir = join(await mkdtemp(join(tmpdir(), "opencode-reader-")), "Books", "new")
   const source = join(from, "book.epub")
   await writeFile(source, sampleEpub())
-  const first = addBooks(source, dir)
+  const first = await addBooks(source, dir)
   const dest = join(dir, "book.epub")
   assert.deepEqual(first, { added: [{ path: dest, key: bookKey({ file: dest }), title: "Le Petit Livre d’essai" }], skipped: [] })
   assert.ok(readFileSync(dest).equals(readFileSync(source)))
@@ -365,21 +365,21 @@ test("adding books: a valid file is copied 0600 into a folder created when missi
   // The same content, under any name, is already there: the copy in the folder is given.
   const renamed = join(from, "other name.epub")
   await writeFile(renamed, sampleEpub())
-  const again = addBooks(renamed, dir)
+  const again = await addBooks(renamed, dir)
   assert.deepEqual(again.added, [])
   assert.deepEqual(again.skipped, [{ name: "other name.epub", reason: "already there", existing: first.added[0] }])
 
   // Another book of the same name gets a suffix; the first copy is untouched.
   const other = join(await mkdtemp(join(tmpdir(), "opencode-reader-from-")), "book.epub")
   await writeFile(other, sampleEpub([], "<p>Another text.</p>"))
-  const suffixed = addBooks(other, dir)
+  const suffixed = await addBooks(other, dir)
   assert.deepEqual(suffixed.added.map((b) => b.path), [join(dir, "book (2).epub")])
   assert.ok(readFileSync(dest).equals(readFileSync(source)))
   assert.ok(readFileSync(join(dir, "book (2).epub")).equals(readFileSync(other)))
 
   // A source already in the folder is already there.
-  assert.deepEqual(addBooks(dest, dir), { added: [], skipped: [{ name: "book.epub", reason: "already there", existing: first.added[0] }] })
-  assert.deepEqual(addBooks(join(from, "missing.epub"), dir), { added: [], skipped: [{ name: "missing.epub", reason: "not found" }] })
+  assert.deepEqual(await addBooks(dest, dir), { added: [], skipped: [{ name: "book.epub", reason: "already there", existing: first.added[0] }] })
+  assert.deepEqual(await addBooks(join(from, "missing.epub"), dir), { added: [], skipped: [{ name: "missing.epub", reason: "not found" }] })
 })
 
 test("adding books: a folder's EPUBs three levels deep; non-EPUB and DRM files are refused", async () => {
@@ -394,7 +394,7 @@ test("adding books: a folder's EPUBs three levels deep; non-EPUB and DRM files a
   await writeFile(join(from, "notes.txt"), "x")
   const drm = sampleEpub([{ name: "META-INF/rights.xml", data: "<rights/>" }])
   await writeFile(join(from, "locked.epub"), drm)
-  const result = addBooks(from, dir)
+  const result = await addBooks(from, dir)
   // one.epub and same.epub are one book: whichever comes first is added.
   const names = result.added.map((b) => b.path.slice(dir.length + 1)).sort()
   const twin = names[0] === "one.epub" ? "same.epub" : "one.epub"
@@ -403,10 +403,10 @@ test("adding books: a folder's EPUBs three levels deep; non-EPUB and DRM files a
     result.skipped.map((s) => `${s.name}: ${s.reason}`).sort(),
     ["fake.epub: not an EPUB", "locked.epub: protected (DRM)", `${twin}: already there`].sort(),
   )
-  assert.deepEqual(addBooks(join(from, "notes.txt"), dir).skipped, [{ name: "notes.txt", reason: "not an EPUB" }])
-  assert.deepEqual(addBooks(join(from, "locked.epub"), dir).skipped, [{ name: "locked.epub", reason: "protected (DRM)" }])
+  assert.deepEqual((await addBooks(join(from, "notes.txt"), dir)).skipped, [{ name: "notes.txt", reason: "not an EPUB" }])
+  assert.deepEqual((await addBooks(join(from, "locked.epub"), dir)).skipped, [{ name: "locked.epub", reason: "protected (DRM)" }])
   // Adding the library folder itself adds nothing.
-  const own = addBooks(dir, dir)
+  const own = await addBooks(dir, dir)
   assert.deepEqual([own.added, own.skipped.map((s) => s.reason)], [[], ["already there", "already there"]])
   assert.deepEqual(readdirSync(dir).sort(), names)
 })
@@ -438,7 +438,7 @@ test("adding books: a source over the cap is refused, counted as it is read, and
   const big = join(from, "big.epub")
   await writeFile(big, sampleEpub())
   truncateSync(big, MAX_ADD_FILE + 1)
-  assert.deepEqual(addBooks(big, dir), { added: [], skipped: [{ name: "big.epub", reason: "too large" }] })
+  assert.deepEqual(await addBooks(big, dir), { added: [], skipped: [{ name: "big.epub", reason: "too large" }] })
   assert.deepEqual(readdirSync(dir), [])
 
   // A file that grows past the cap after it was checked: the copy stops at the cap.
@@ -468,6 +468,27 @@ test("adding books: a book without a title is named after its source file, not t
       { name: "OEBPS/c1.xhtml", data: chapter("One", "<p>Text.</p>") },
     ]),
   )
-  const result = addBooks(source, dir)
+  const result = await addBooks(source, dir)
   assert.deepEqual(result.added.map((b) => b.title), ["Untitled Story"])
+})
+
+test("adding books: a folder is read up to the cap, the rest reported, and other work runs meanwhile", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  const total = MAX_ADD_BOOKS + 2
+  // Unreadable files: refused at once, without a copy.
+  for (let i = 0; i < total; i++) await writeFile(join(from, `f${String(i).padStart(3, "0")}.epub`), "x", { mode: 0o000 })
+  let ticks = 0
+  const timer = setInterval(() => ticks++, 0)
+  let result: Awaited<ReturnType<typeof addBooks>>
+  try {
+    result = await addBooks(from, dir)
+  } finally {
+    clearInterval(timer)
+  }
+  const reasons = new Map<string, number>()
+  for (const s of result.skipped) reasons.set(s.reason, (reasons.get(s.reason) ?? 0) + 1)
+  assert.deepEqual(Object.fromEntries(reasons), { unreadable: MAX_ADD_BOOKS, "too many files: add a smaller folder": 2 })
+  assert.ok(ticks > 0, "the event loop ran during the add")
+  assert.deepEqual(readdirSync(dir), [])
 })

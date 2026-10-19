@@ -183,6 +183,9 @@ export function readNote(path: string, href: string): string {
 /** Largest book file added, as for the cloud and ADB copies. */
 export const MAX_ADD_FILE = 512 * 1024 * 1024
 export const ALREADY_THERE = "already there"
+/** Most books read by one add; the others are skipped with `TOO_MANY`. */
+export const MAX_ADD_BOOKS = 500
+export const TOO_MANY = "too many files: add a smaller folder"
 
 export type AddedBook = { path: string; key: string; title: string }
 /** `existing`: the copy already in the folder, for an "already there" book. */
@@ -280,9 +283,10 @@ export function copyToTemp(source: number, dir: string, limit = MAX_ADD_FILE): {
  * opens as a book does for reading (no DRM, same limits). Nothing is ever
  * overwritten: a book identical to one in `dir` (size and content), or a
  * source already in `dir`, is "already there"; another book of the same
- * name gets a " (2)" suffix.
+ * name gets a " (2)" suffix. At most `MAX_ADD_BOOKS` files are read; the event
+ * loop runs between two books, so other requests are served meanwhile.
  */
-export function addBooks(source: string, dir: string): AddResult {
+export async function addBooks(source: string, dir: string): Promise<AddResult> {
   const result: AddResult = { added: [], skipped: [] }
   let files: string[]
   try {
@@ -291,6 +295,8 @@ export function addBooks(source: string, dir: string): AddResult {
     result.skipped.push({ name: basename(source), reason: "not found" })
     return result
   }
+  for (const file of files.slice(MAX_ADD_BOOKS)) result.skipped.push({ name: basename(file), reason: TOO_MANY })
+  files = files.slice(0, MAX_ADD_BOOKS)
   // Books of `dir` by size (read at the first copy), hashed only when a candidate has the same size.
   const bySize = new Map<number, string[]>()
   let scanned = false
@@ -305,7 +311,8 @@ export function addBooks(source: string, dir: string): AddResult {
     }
     return { path, key: bookKey({ file: path }), title }
   }
-  for (const file of files) {
+  for (const [i, file] of files.entries()) {
+    if (i > 0) await new Promise<void>((resolve) => setImmediate(resolve))
     const name = basename(file)
     const skip = (reason: string, existing?: AddedBook) => void result.skipped.push({ name, reason, ...(existing ? { existing } : {}) })
     if (!/\.epub$/i.test(name)) {
