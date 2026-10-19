@@ -31,12 +31,11 @@ export type OpenResult = ({ ok: true } & BookIndex) | { ok: false; error: string
 export type ChapterResult = { ok: true; paragraphs: Paragraph[] } | { ok: false; error: string }
 
 export type SyncSettings = { cloud: boolean; pushIdleMinutes: number }
-/** The Onyx cloud library (last known when `state` is not "ok"), and whether ADB sees the Boox. */
+/** The Onyx cloud library (last known when `state` is not "ok"). */
 export type CloudListing = {
   state: OnyxState
   message: string
   checkedAt?: number
-  adb: AdbState
   collections: CloudCollection[]
   books: Array<CloudBook & { key: string; cached?: string }>
 }

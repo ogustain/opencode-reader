@@ -255,7 +255,7 @@ export default Plugin.define({
           const cached = cachedBy.get(`${b.path}:${b.size}`)
           return { ...b, key: bookKey({ booxPath: b.path }), ...(cached ? { cached } : {}) }
         })
-        return { ...cloud, books, adb: (await adb.status()).state }
+        return { ...cloud, books }
       },
       pull: async (input): Promise<PullResult> => {
         const { path, booxPath } = (input ?? {}) as { path?: string; booxPath?: string }
