@@ -172,6 +172,9 @@ export default Plugin.define({
     const backupFile = defaultBackupFile(dataDir)
     // Book files: the cached copy, else the cloud copy (downloaded beside the file), else ADB.
     const manifestLock = createLock()
+    // Pushes of one book doc run one at a time (several windows may push it).
+    const docLocks = new Map<string, ReturnType<typeof createLock>>()
+    const docLock = (id: string) => docLocks.get(id) ?? docLocks.set(id, createLock()).get(id)!
     const fetchFile = createFetcher({
       cloud: () =>
         onyx.configured()
@@ -296,46 +299,48 @@ export default Plugin.define({
           if (!copy || copy.booxPath !== booxPath || (book.size > 0 && copy.size !== book.size))
             return { ok: false, state: "error", error: "the local copy is not the Boox file" }
           const bookRefs = refsOf(path)
-          for (let attempt = 0; ; attempt++) {
-            const doc = await onyx.getDoc(book.id)
-            const reading = cloudReading(doc)
-            const cloudLocal = reading.point ? toLocal(reading.point, bookRefs, (s) => mapOf(path, s)) : undefined
-            const total = docTotal(doc)
-            const decision = decidePush({
-              turnedAt: turnedAt as number,
-              cloudTime: reading.updateTime,
-              ...(reading.deviceModel ? { deviceModel: reading.deviceModel } : {}),
-              ...(knownPush ? { own: knownPush } : {}),
-              local,
-              ...(cloudLocal ? { cloud: { spine: cloudLocal.spine, offset: cloudLocal.offset } } : {}),
-              ...(total ? { progress: { local: progressFor(percent as number, total, finished === true), cloud: doc.progress } } : {}),
-            })
-            if (!decision.push) return { ok: true, pushed: false, reason: decision.reason }
-            const fields = toNeo(local, bookRefs, mapOf(path, local.spine))
-            if (!fields) return { ok: false, state: "error", error: "unknown chapter" }
-            // Same chapter as the cloud: keep the byte range NeoReader computed.
-            const point = reading.point
-            if (point?.chapterIndex === fields.chapterIndex && point.chapterStartPosition !== undefined && point.chapterEndPosition !== undefined) {
-              fields.chapterStartPosition = point.chapterStartPosition
-              fields.chapterEndPosition = point.chapterEndPosition
+          return await docLock(book.id)(async (): Promise<PushResult> => {
+            for (let attempt = 0; ; attempt++) {
+              const doc = await onyx.getDoc(book.id)
+              const reading = cloudReading(doc)
+              const cloudLocal = reading.point ? toLocal(reading.point, bookRefs, (s) => mapOf(path, s)) : undefined
+              const total = docTotal(doc)
+              const decision = decidePush({
+                turnedAt: turnedAt as number,
+                cloudTime: reading.updateTime,
+                ...(reading.deviceModel ? { deviceModel: reading.deviceModel } : {}),
+                ...(knownPush ? { own: knownPush } : {}),
+                local,
+                ...(cloudLocal ? { cloud: { spine: cloudLocal.spine, offset: cloudLocal.offset } } : {}),
+                ...(total ? { progress: { local: progressFor(percent as number, total, finished === true), cloud: doc.progress } } : {}),
+              })
+              if (!decision.push) return { ok: true, pushed: false, reason: decision.reason }
+              const fields = toNeo(local, bookRefs, mapOf(path, local.spine))
+              if (!fields) return { ok: false, state: "error", error: "unknown chapter" }
+              // Same chapter as the cloud: keep the byte range NeoReader computed.
+              const point = reading.point
+              if (point?.chapterIndex === fields.chapterIndex && point.chapterStartPosition !== undefined && point.chapterEndPosition !== undefined) {
+                fields.chapterStartPosition = point.chapterStartPosition
+                fields.chapterEndPosition = point.chapterEndPosition
+              }
+              const now = Date.now()
+              const patched = patchBookDoc(doc, { fields, percent: percent as number, finished: finished === true, now })
+              if (!patched) {
+                const error = reading.point ? "this book's cloud record has an unexpected shape" : "no reading position in the cloud yet: open the book once on the BOOX"
+                return { ok: false, state: "error", error }
+              }
+              saveBackup(backupFile, doc, now)
+              try {
+                await onyx.putDoc(patched as CloudDoc)
+                // The cached listing shows the new %, and hides a book finished here, before the next library read.
+                cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, patched.progress) }
+                await save("cloud", cloud)
+                return { ok: true, pushed: true, at: now }
+              } catch (error) {
+                if (stateOf(error) !== "conflict" || attempt > 0) throw error
+              }
             }
-            const now = Date.now()
-            const patched = patchBookDoc(doc, { fields, percent: percent as number, finished: finished === true, now })
-            if (!patched) {
-              const error = reading.point ? "this book's cloud record has an unexpected shape" : "no reading position in the cloud yet: open the book once on the BOOX"
-              return { ok: false, state: "error", error }
-            }
-            saveBackup(backupFile, doc, now)
-            try {
-              await onyx.putDoc(patched as CloudDoc)
-              // The cached listing shows the new %, and hides a book finished here, before the next library read.
-              cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, patched.progress) }
-              await save("cloud", cloud)
-              return { ok: true, pushed: true, at: now }
-            } catch (error) {
-              if (stateOf(error) !== "conflict" || attempt > 0) throw error
-            }
-          }
+          })
         } catch (error) {
           return { ok: false, state: stateOf(error), error: message(error) }
         }

@@ -254,6 +254,15 @@ export function savedTimes(
   }
 }
 
+/**
+ * A save keeps the stored reading when it is newer than the one held here
+ * (`turnedAt`, the page-turn time of this window's position): another window
+ * read further meanwhile, and its position and time must not be overwritten.
+ */
+export function keepsStored(stored: { updatedAt: number } | undefined, turnedAt: number): boolean {
+  return !!stored && stored.updatedAt > turnedAt
+}
+
 /** Where to open a Boox book: its Boox position when read there more recently. */
 export function chooseStart(
   local: { updatedAt: number } | undefined,

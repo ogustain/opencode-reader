@@ -24,7 +24,7 @@ import { createElement as _$createElement } from "@opentui/solid";
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
-import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, lastScreen, layout, nextChapter, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
+import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
 import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pushQueue } from "../src/sync.ts";
 const PANEL = "opencode-reader";
@@ -144,10 +144,17 @@ export default Plugin.define({
       return b ? progressOf(b.chapters, position(), finished()) : 0;
     };
 
+    // The reading held here: its book and the page-turn time of the current
+    // position (a turn sets it; opening keeps the saved one; 0 before any turn).
+    // Position and time always go together, in saves and pushes.
+    let reading = {
+      key: "",
+      turnedAt: 0
+    };
+    const readAt = key => reading.key === key ? reading.turnedAt : 0;
+
     // Debounced save of the current position; flushed on close and unload.
-    // `turnedAt`: when the reader last turned a page since the last save (not set by opening or resuming).
     let saveTimer;
-    let turnedAt;
     const flush = (opened = false) => {
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = undefined;
@@ -156,16 +163,16 @@ export default Plugin.define({
       const pos = position();
       const value = percent();
       const done = finished();
-      const times = {
-        ...(turnedAt !== undefined ? {
-          turnedAt
-        } : {}),
-        opened,
-        now: Date.now()
-      };
-      turnedAt = undefined;
+      const now = Date.now();
+      const turnedAt = readAt(b.key);
       void setStore(draft => {
         const previous = draft.books[b.key];
+        draft.current = b.key;
+        // Another window read further: keep its position and time.
+        if (keepsStored(previous, turnedAt)) {
+          if (opened) previous.openedAt = now;
+          return;
+        }
         draft.books[b.key] = {
           ...previous,
           path: b.path,
@@ -177,9 +184,12 @@ export default Plugin.define({
           offset: pos.offset,
           percent: value,
           finished: done,
-          ...savedTimes(previous, times)
+          ...savedTimes(previous, {
+            turnedAt,
+            opened,
+            now
+          })
         };
-        draft.current = b.key;
       }).catch(() => {});
     };
     const scheduleSave = () => {
@@ -224,10 +234,9 @@ export default Plugin.define({
       const b = book();
       if (!b) return;
       if (user) {
-        turnedAt = Date.now();
-        lastTurn = {
+        reading = {
           key: b.key,
-          at: turnedAt
+          turnedAt: Date.now()
         };
         scheduleIdlePush();
       }
@@ -256,20 +265,15 @@ export default Plugin.define({
     /** The "go to N %" hint is for when the cloud cannot carry the position. */
     const cloudCarries = saved => cloudState() === "ok" && saved?.cloud?.state !== "failed";
     const sentToBoox = saved => saved?.cloud?.state === "sent" && (saved.cloud.turnedAt ?? 0) >= saved.updatedAt;
-    let lastTurn = {
-      key: "",
-      at: 0
-    };
     const snapshot = () => {
       const b = book();
       if (!b) return undefined;
-      const turnedAt = Math.max(store.books[b.key]?.updatedAt ?? 0, lastTurn.key === b.key ? lastTurn.at : 0);
       return {
         book: b,
         position: position(),
         percent: percent(),
         finished: finished(),
-        turnedAt
+        turnedAt: readAt(b.key)
       };
     };
     const setCloud = (key, cloud) => void setStore(draft => {
@@ -397,13 +401,12 @@ export default Plugin.define({
       }))).catch(() => {});
       // The reader moved meanwhile: their move wins.
       if (book()?.key !== b.key || position() !== before) return;
-      const saved = store.books[b.key];
       const remote = c.spine !== undefined && c.offset !== undefined && c.spine < b.chapters.length ? {
         spine: c.spine,
         offset: c.offset
       } : undefined;
       const pull = {
-        turnedAt: saved?.updatedAt,
+        turnedAt: readAt(b.key),
         updateTime: c.updateTime,
         lastAccess: c.lastAccess,
         ...(c.deviceModel ? {
@@ -469,7 +472,10 @@ export default Plugin.define({
         spine: first,
         offset: 0
       });
-      turnedAt = undefined;
+      reading = {
+        key: b.key,
+        turnedAt: saved?.updatedAt ?? 0
+      };
       setBook(b);
       setChapter(undefined);
       await goTo(pos, false, savedFinish(saved, pos));
