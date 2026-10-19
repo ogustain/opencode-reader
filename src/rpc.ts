@@ -79,7 +79,7 @@ export const ReaderRpc = Rpc.define({
     settings: { input: object, output: object },
     /** { refresh?: boolean } → CloudListing (the cloud is asked at most once a minute) */
     cloud: { input: object, output: object },
-    /** { path, booxPath } → PullResult */
+    /** { path, booxPath, turnedAt? } → PullResult (`turnedAt`: page-turn time of the local reading, recorded with the revision seen) */
     pull: { input: object, output: object },
     /** { path, booxPath, spine, offset, percent, turnedAt, own?: OwnPush } → PushResult (GET, then PUT of the book doc) */
     push: { input: object, output: object },

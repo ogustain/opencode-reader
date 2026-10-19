@@ -149,6 +149,13 @@ before the `PUT` means a write whose answer was lost is still known as ours:
 it never wins a pull against a newer page turn here, and it does not block
 the next push as "the BOOX is newer".
 
+The `_rev` seen at each read and write is recorded too (with the page-turn
+time of the local reading then). A doc still at that revision has not been
+written by anyone since: a page turned here since wins, without comparing
+the device's clock. Only a doc changed since (new revision, not ours) is
+compared by time, `user_doc_data_update_time` (device clock) against the
+local page-turn time.
+
 ## Book files (OSS)
 
 After "Upload source file" on the device, the EPUB is stored in Aliyun OSS.

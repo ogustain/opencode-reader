@@ -321,7 +321,9 @@ export default Plugin.define({
       }
       lastPull.set(b.key, Date.now())
       const before = position()
-      const result = (await reader.pull({ path: b.path, booxPath: b.booxPath }).catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PullResult
+      // The local reading's time, as the server records it with the revision seen (any window's latest save counts).
+      const basis = Math.max(readAt(b.key), store.books[b.key]?.updatedAt ?? 0)
+      const result = (await reader.pull({ path: b.path, booxPath: b.booxPath, ...(basis ? { turnedAt: basis } : {}) }).catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PullResult
       if (!result.ok) {
         noteCloud(result.state, result.error)
         return

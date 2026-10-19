@@ -240,10 +240,21 @@ export type OwnPush = { pushedAt: number; turnedAt: number; progress?: string }
 /**
  * What the server keeps per book doc across restarts: `writes`, our last
  * attempted writes, each recorded before its PUT (so a PUT whose answer was
- * lost is still known as ours).
+ * lost is still known as ours); `seen`, the doc revision at the last pull or
+ * push, with the page-turn time the local reading had then (local clock).
  */
-export type CloudMark = { writes?: OwnPush[] }
+export type CloudMark = { writes?: OwnPush[]; seen?: { rev: string; turnedAt: number } }
 export const WRITES_KEPT = 5
+
+/**
+ * The mark having seen revision `rev` while the local reading dated from
+ * `turnedAt`. Seen again at the same revision, the latest local time is kept.
+ */
+export function withSeen(mark: CloudMark | undefined, rev: unknown, turnedAt: number): CloudMark {
+  if (typeof rev !== "string" || !rev || !Number.isFinite(turnedAt)) return mark ?? {}
+  const before = mark?.seen?.rev === rev ? mark.seen.turnedAt : 0
+  return { ...mark, seen: { rev, turnedAt: Math.max(before, turnedAt) } }
+}
 
 /** The mark with one more attempted write, the oldest dropped. */
 export function withWrite(mark: CloudMark | undefined, write: OwnPush): CloudMark {
@@ -251,19 +262,36 @@ export function withWrite(mark: CloudMark | undefined, write: OwnPush): CloudMar
 }
 
 /**
- * Who wrote the reading the cloud doc holds. "ours": one of our writes (from
- * OpenCode, with its update time and progress), so not a Boox reading; its
- * `turnedAt` is the page-turn time it carried, on the local clock.
- * "changed": the Boox's (or anyone's), dated by its own clock.
+ * Who wrote the reading the cloud doc holds, judged by revisions rather than
+ * clocks. "ours": one of our writes (from OpenCode, with its update time and
+ * progress), so not a Boox reading; its `turnedAt` is the page-turn time it
+ * carried, on the local clock. "seen": the doc is unchanged since the last
+ * pull or push (same `_rev`), when the local reading dated from `turnedAt`.
+ * "changed": someone else (the Boox) wrote since, dated by its own clock.
  */
-export type CloudSide = { kind: "ours"; turnedAt: number } | { kind: "changed" }
+export type CloudSide = { kind: "ours"; turnedAt: number } | { kind: "seen"; turnedAt: number } | { kind: "changed" }
 
-export function cloudSide(cloud: { updateTime: number; deviceModel?: string; progress?: unknown }, mark: CloudMark | undefined): CloudSide {
-  if (cloud.deviceModel !== OWN_DEVICE) return { kind: "changed" }
-  const own = [...(mark?.writes ?? [])]
-    .reverse()
-    .find((w) => w.pushedAt === cloud.updateTime && (w.progress === undefined || w.progress === cloud.progress))
-  return own ? { kind: "ours", turnedAt: own.turnedAt } : { kind: "changed" }
+export function cloudSide(cloud: { updateTime: number; deviceModel?: string; progress?: unknown; rev?: unknown }, mark: CloudMark | undefined): CloudSide {
+  const own =
+    cloud.deviceModel === OWN_DEVICE
+      ? [...(mark?.writes ?? [])].reverse().find((w) => w.pushedAt === cloud.updateTime && (w.progress === undefined || w.progress === cloud.progress))
+      : undefined
+  if (own) return { kind: "ours", turnedAt: own.turnedAt }
+  if (mark?.seen && typeof cloud.rev === "string" && cloud.rev === mark.seen.rev) return { kind: "seen", turnedAt: mark.seen.turnedAt }
+  return { kind: "changed" }
+}
+
+/**
+ * Whether a local reading of `turnedAt` is newer than the cloud's. Our own
+ * write, or a doc unchanged since we saw it: newer when the page turned here
+ * since (local clock only, so a skewed Boox clock does not matter). Otherwise
+ * the Boox wrote since: when the page also turned here since, it is a real
+ * conflict, and the clocks decide (`cloudTime`, the Boox's).
+ */
+function localIsNewer(turnedAt: number, side: CloudSide, cloudTime: number): boolean {
+  if (side.kind === "ours") return turnedAt > side.turnedAt
+  if (side.kind === "seen" && turnedAt > side.turnedAt) return true
+  return turnedAt > cloudTime
 }
 
 export type PushDecision = { push: true } | { push: false; reason: "no local reading" | "the Boox is newer" | "same position" | "already sent" }
@@ -287,8 +315,7 @@ export function decidePush(input: {
 }): PushDecision {
   if (!input.turnedAt) return { push: false, reason: "no local reading" }
   const side = input.side ?? { kind: "changed" }
-  if (side.kind === "ours" && input.turnedAt <= side.turnedAt) return { push: false, reason: "already sent" }
-  if (side.kind === "changed" && input.turnedAt <= input.cloudTime) return { push: false, reason: "the Boox is newer" }
+  if (!localIsNewer(input.turnedAt, side, input.cloudTime)) return { push: false, reason: side.kind === "ours" ? "already sent" : "the Boox is newer" }
   if (same(input.local, input.cloud) && (!input.progress || sameProgress(input.progress.local, input.progress.cloud)))
     return { push: false, reason: "same position" }
   return { push: true }
@@ -305,8 +332,9 @@ function sameProgress(a: unknown, b: unknown): boolean {
  * Open at the cloud position when it differs and is newer than the local
  * reading: a Boox reading saved or opened after the last local page turn, or
  * one of our writes (`side`) carrying a later page turn than the one held
- * here (another window's). Our own write never wins against a newer local
- * reading, even when the Boox opened the book since.
+ * here (another window's). Our own write, or a doc unchanged since we saw it,
+ * never wins against a page turned here since, even when the Boox opened the
+ * book meanwhile.
  */
 export function decidePull(input: {
   turnedAt?: number
@@ -320,6 +348,7 @@ export function decidePull(input: {
   const turnedAt = input.turnedAt ?? 0
   const side = input.side ?? { kind: "changed" }
   if (side.kind === "ours") return turnedAt < side.turnedAt
+  if (side.kind === "seen" && turnedAt > side.turnedAt) return false
   return Math.max(input.updateTime, input.lastAccess) > turnedAt
 }
 

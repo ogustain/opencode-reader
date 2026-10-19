@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mapChapter } from "./neoposition.ts"
 import {
-  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, progressFor, pushQueue, setBackendFields, toLocal, toNeo, withPushedProgress, withWrite,
+  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, progressFor, pushQueue, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
   type NeoRef,
 } from "./sync.ts"
 
@@ -292,4 +292,37 @@ test("a push finishing a book hides it from the cached library at once", () => {
   // A push short of the end updates the %, and an unreadable progress leaves the cache as it was.
   assert.equal(withPushedProgress(library.books, library.books[1].id, "5/10")[1].percent, 50)
   assert.deepEqual(withPushedProgress(library.books, library.books[0].id, undefined), library.books)
+})
+
+test("a Boox clock ahead does not win when the cloud has not changed since we saw it", () => {
+  const local = { spine: 5, offset: 0 }
+  const boox = { spine: 2, offset: 100 }
+  // The Boox saved at real time 1000, its clock 5 minutes ahead: stamped 301_000. Pulled here at rev 7-a, local reading of 900.
+  const updateTime = 301_000
+  let mark = withSeen(undefined, "7-a", 900)
+  const seen = cloudSide({ updateTime, deviceModel: "Go7", rev: "7-a" }, mark)
+  assert.deepEqual(seen, { kind: "seen", turnedAt: 900 })
+  // Pages turned here at 2000 (before the Boox's skewed stamp): local wins, both ways.
+  assert.deepEqual(decidePush({ turnedAt: 2000, cloudTime: updateTime, side: seen, local, cloud: boox }), { push: true })
+  assert.equal(decidePull({ turnedAt: 2000, updateTime, lastAccess: updateTime, side: seen, local, cloud: boox }), false)
+  // No page turned here since: the clocks still decide (the Boox position opens here).
+  assert.deepEqual(decidePush({ turnedAt: 900, cloudTime: updateTime, side: seen, local, cloud: boox }), { push: false, reason: "the Boox is newer" })
+  assert.equal(decidePull({ turnedAt: 900, updateTime, lastAccess: 0, side: seen, local, cloud: boox }), true)
+
+  // A real change on the Boox since (new rev) and pages turned here too: a conflict, the clocks decide as before.
+  const changed = cloudSide({ updateTime, deviceModel: "Go7", rev: "8-b" }, mark)
+  assert.deepEqual(changed, { kind: "changed" })
+  assert.deepEqual(decidePush({ turnedAt: 2000, cloudTime: updateTime, side: changed, local, cloud: boox }), { push: false, reason: "the Boox is newer" })
+  assert.equal(decidePull({ turnedAt: 2000, updateTime, lastAccess: 0, side: changed, local, cloud: boox }), true)
+  assert.deepEqual(decidePush({ turnedAt: 302_000, cloudTime: updateTime, side: changed, local, cloud: boox }), { push: true })
+
+  // Seen again at the same revision, the later local time is kept; a new revision starts over.
+  mark = withSeen(mark, "7-a", 500)
+  assert.deepEqual(mark.seen, { rev: "7-a", turnedAt: 900 })
+  mark = withSeen(mark, "8-b", 500)
+  assert.deepEqual(mark.seen, { rev: "8-b", turnedAt: 500 })
+  assert.deepEqual(withSeen(mark, "", 600), mark) // No revision (an empty PUT answer): unchanged.
+  // Our own write still wins over a stale "seen" of the same revision.
+  const both = withWrite(withSeen(undefined, "9-c", 100), { pushedAt: 50, turnedAt: 400 })
+  assert.deepEqual(cloudSide({ updateTime: 50, deviceModel: "OpenCode", rev: "9-c" }, both), { kind: "ours", turnedAt: 400 })
 })

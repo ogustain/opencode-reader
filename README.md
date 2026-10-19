@@ -185,6 +185,12 @@ matched with the BOOX library).
   last page turn here is newer than the BOOX's last save and the position
   changed. On the BOOX, open the book and **accept the sync pop-up**:
   NeoReader jumps to the OpenCode position.
+- **Who is newer.** The plugin remembers the cloud record's revision at each
+  read and write. If the record has not changed since (or holds the
+  plugin's own write), any page turned here since wins, whatever the BOOX's
+  clock says. If the BOOX saved since **and** you turned pages here too, it
+  is a real conflict: the most recent of the two times wins (BOOX clock
+  against this computer's clock).
 
 Protocol details for contributors are in
 [docs/onyx-cloud.md](docs/onyx-cloud.md).

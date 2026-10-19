@@ -35,7 +35,7 @@ import {
   type PushResult,
 } from "./rpc.ts"
 import {
-  cloudLibrary, cloudReading, cloudSide, decidePush, docTotal, parseProgress, patchBookDoc, progressFor, toLocal, toNeo, withPushedProgress, withWrite,
+  cloudLibrary, cloudReading, cloudSide, decidePush, docTotal, parseProgress, patchBookDoc, progressFor, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
   type CloudLibrary, type NeoRef, type OwnPush,
 } from "./sync.ts"
 
@@ -266,7 +266,7 @@ export default Plugin.define({
         return { ...cloud, books }
       },
       pull: async (input): Promise<PullResult> => {
-        const { path, booxPath } = (input ?? {}) as { path?: string; booxPath?: string }
+        const { path, booxPath, turnedAt } = (input ?? {}) as { path?: string; booxPath?: string; turnedAt?: unknown }
         if (typeof path !== "string" || !within(path, roots) || typeof booxPath !== "string") return { ok: false, state: "error", error: "invalid book" }
         try {
           const book = await cloudBook(booxPath)
@@ -275,7 +275,9 @@ export default Plugin.define({
           const reading = cloudReading(doc)
           const progress = parseProgress(doc.progress)
           const local = reading.point ? toLocal(reading.point, refsOf(path), (spine) => mapOf(path, spine)) : undefined
-          const side = cloudSide({ ...reading, progress: doc.progress }, readMarks(syncFile)[book.id])
+          const side = cloudSide({ ...reading, progress: doc.progress, rev: doc._rev }, readMarks(syncFile)[book.id])
+          // Seen at this revision while the local reading dated from `turnedAt`.
+          if (typeof turnedAt === "number" && turnedAt > 0) updateMark(syncFile, book.id, (m) => withSeen(m, doc._rev, turnedAt))
           return {
             ok: true,
             cloud: {
@@ -314,7 +316,7 @@ export default Plugin.define({
               const total = docTotal(doc)
               // Our writes: the server's record, and the TUI's last acknowledged one (older versions kept it only there).
               const mark = readMarks(syncFile)[book.id]
-              const side = cloudSide({ ...reading, progress: doc.progress }, knownPush ? withWrite(mark, knownPush) : mark)
+              const side = cloudSide({ ...reading, progress: doc.progress, rev: doc._rev }, knownPush ? withWrite(mark, knownPush) : mark)
               const decision = decidePush({
                 turnedAt: turnedAt as number,
                 cloudTime: reading.updateTime,
@@ -324,6 +326,7 @@ export default Plugin.define({
                 ...(total ? { progress: { local: progressFor(percent as number, total, finished === true), cloud: doc.progress } } : {}),
               })
               if (!decision.push) {
+                if (decision.reason !== "no local reading") updateMark(syncFile, book.id, (m) => withSeen(m, doc._rev, turnedAt as number))
                 const ack = side.kind === "ours" ? { ack: { pushedAt: reading.updateTime, turnedAt: side.turnedAt } } : {}
                 return { ok: true, pushed: false, reason: decision.reason, ...ack }
               }
@@ -345,7 +348,8 @@ export default Plugin.define({
               // Recorded first: if the answer to the PUT is lost, the next GET still shows this write as ours.
               updateMark(syncFile, book.id, (m) => withWrite(m, { pushedAt: now, turnedAt: turnedAt as number, progress: String(patched.progress) }))
               try {
-                await onyx.putDoc(patched as CloudDoc)
+                const rev = await onyx.putDoc(patched as CloudDoc)
+                updateMark(syncFile, book.id, (m) => withSeen(m, rev, turnedAt as number))
                 // The cached listing shows the new %, and hides a book finished here, before the next library read.
                 cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, patched.progress) }
                 await save("cloud", cloud)
