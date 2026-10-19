@@ -4,7 +4,7 @@
  * One chapter is decoded at a time; nothing keeps a whole book in memory.
  */
 import { createHash, randomBytes } from "node:crypto"
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeSync, type Dirent } from "node:fs"
+import { closeSync, constants, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, posix, relative, resolve, sep } from "node:path"
 import { decodeXml, fileSource, openZip, readPackage, resolveHref, type Zip } from "./epub.ts"
@@ -96,10 +96,13 @@ export function readMeta(path: string): { title: string; author?: string } {
   })
 }
 
-/** Decodes each chapter once, keeping only its length and first heading. */
-export function buildIndex(path: string): BookIndex {
+/**
+ * Decodes each chapter once, keeping only its length and first heading.
+ * `name`: the title of a book without one (its file name by default).
+ */
+export function buildIndex(path: string, name = fallback(path)): BookIndex {
   return withZip(path, (zip) => {
-    const pkg = readPackage(zip, fallback(path))
+    const pkg = readPackage(zip, name)
     // A document the spine repeats is decoded once.
     const seen = new Map<string, BookIndex["chapters"][number]>()
     const chapters = pkg.spine.map((doc) => {
@@ -240,25 +243,23 @@ export function publishCopy(temp: string, dir: string, name: string, link: (from
 }
 
 /**
- * Copies `file` into `dir` under `name`, or `name (2)`, `(3)`…: a 0600 temp
- * file in `dir`, written whole and flushed, then published by `publishCopy`.
- * Returns the new path.
+ * Copies the open file `source` into a new 0600 temp file in `dir`, written
+ * whole and flushed, counting the bytes: past `limit` it stops with "too
+ * large". The temp file is removed on any failure. Returns it with its size.
  */
-function copyInto(file: string, dir: string, name: string): string {
+export function copyToTemp(source: number, dir: string, limit = MAX_ADD_FILE): { temp: string; size: number } {
   const temp = join(dir, `.${randomBytes(6).toString("hex")}.epub.tmp`)
   const out = openSync(temp, "wx", 0o600)
+  let size = 0
   try {
     try {
-      const source = openSync(file, "r")
-      try {
-        const buffer = Buffer.alloc(1024 * 1024)
-        for (;;) {
-          const n = readSync(source, buffer, 0, buffer.length, null)
-          if (n === 0) break
-          for (let done = 0; done < n; ) done += writeSync(out, buffer, done, n - done)
-        }
-      } finally {
-        closeSync(source)
+      const buffer = Buffer.alloc(1024 * 1024)
+      for (;;) {
+        const n = readSync(source, buffer, 0, buffer.length, null)
+        if (n === 0) break
+        size += n
+        if (size > limit) throw new Error("too large")
+        for (let done = 0; done < n; ) done += writeSync(out, buffer, done, n - done)
       }
       fsyncSync(out)
     } finally {
@@ -268,13 +269,15 @@ function copyInto(file: string, dir: string, name: string): string {
     rmSync(temp, { force: true })
     throw error
   }
-  return publishCopy(temp, dir, name)
+  return { temp, size }
 }
 
 /**
  * Copies the EPUB at `source`, or the EPUBs of a folder (three levels deep, as
- * `scanEpubs`), into `dir` (created when missing). A book is added only when
- * it opens as a book does for reading (no DRM, same limits). Nothing is ever
+ * `scanEpubs`), into `dir` (created when missing). Each file is read once,
+ * into a temp file in `dir`; that copy is what is checked and published, so a
+ * source changed meanwhile cannot slip through. A book is added only when it
+ * opens as a book does for reading (no DRM, same limits). Nothing is ever
  * overwritten: a book identical to one in `dir` (size and content), or a
  * source already in `dir`, is "already there"; another book of the same
  * name gets a " (2)" suffix.
@@ -288,8 +291,9 @@ export function addBooks(source: string, dir: string): AddResult {
     result.skipped.push({ name: basename(source), reason: "not found" })
     return result
   }
-  // Books of `dir` by size, hashed only when a candidate has the same size.
-  let bySize: Map<number, string[]> | undefined
+  // Books of `dir` by size (read at the first copy), hashed only when a candidate has the same size.
+  const bySize = new Map<number, string[]>()
+  let scanned = false
   const hashes = new Map<string, string>()
   const hashOf = (path: string) => hashes.get(path) ?? hashes.set(path, contentHash(path)).get(path)!
   const known = (path: string): AddedBook => {
@@ -308,39 +312,33 @@ export function addBooks(source: string, dir: string): AddResult {
       skip("not an EPUB")
       continue
     }
-    let size: number
+    if (within(file, [dir])) {
+      // Named as the library lists it.
+      const inside = join(dir, relative(realpathSync(dir), realpathSync(file)))
+      skip(ALREADY_THERE, known(inside))
+      continue
+    }
+    // One descriptor, the link followed: what is checked is what is read. A FIFO does not block the open.
+    let fd: number
     try {
-      const stat = statSync(file)
-      if (!stat.isFile()) {
-        skip("not an EPUB")
-        continue
-      }
-      size = stat.size
+      fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK)
     } catch {
       skip("unreadable")
       continue
     }
-    if (size > MAX_ADD_FILE) {
-      skip("too large")
-      continue
-    }
-    let title: string
+    let copy: { temp: string; size: number }
     try {
-      title = buildIndex(file).title
-    } catch (error) {
-      skip(refusal(error))
-      continue
-    }
-    if (within(file, [dir])) {
-      // Named as the library lists it.
-      const inside = join(dir, relative(realpathSync(dir), realpathSync(file)))
-      skip(ALREADY_THERE, { path: inside, key: bookKey({ file: inside }), title })
-      continue
-    }
-    try {
-      if (!bySize) {
+      const stat = fstatSync(fd)
+      if (!stat.isFile()) {
+        skip("not an EPUB")
+        continue
+      }
+      if (stat.size > MAX_ADD_FILE) {
+        skip("too large")
+        continue
+      }
+      if (!scanned) {
         mkdirSync(dir, { recursive: true })
-        bySize = new Map()
         for (const path of scanEpubs(dir)) {
           try {
             const s = statSync(path).size
@@ -349,20 +347,41 @@ export function addBooks(source: string, dir: string): AddResult {
             // Gone meanwhile.
           }
         }
+        scanned = true
       }
-      const same = (bySize.get(size) ?? []).find((path) => hashOf(path) === hashOf(file))
+      copy = copyToTemp(fd, dir)
+    } catch (error) {
+      skip((error as Error).message === "too large" ? "too large" : `copy failed (${(error as NodeJS.ErrnoException).code ?? "error"})`)
+      continue
+    } finally {
+      closeSync(fd)
+    }
+    const { temp, size } = copy
+    try {
+      let title: string
+      try {
+        title = buildIndex(temp, fallback(file)).title
+      } catch (error) {
+        skip(refusal(error))
+        continue
+      }
+      const same = (bySize.get(size) ?? []).find((path) => hashOf(path) === hashOf(temp))
       if (same) {
         skip(ALREADY_THERE, known(same))
         continue
       }
       // A hidden name would not be listed.
       const target = name.replace(/^\.+/, "")
-      const dest = copyInto(file, dir, /\.epub$/i.test(target) && target.length > 5 ? target : "book.epub")
+      const dest = publishCopy(temp, dir, /\.epub$/i.test(target) && target.length > 5 ? target : "book.epub")
       bySize.set(size, [...(bySize.get(size) ?? []), dest])
-      hashes.set(dest, hashOf(file))
+      const digest = hashes.get(temp)
+      if (digest) hashes.set(dest, digest)
       result.added.push({ path: dest, key: bookKey({ file: dest }), title })
     } catch (error) {
       skip((error as Error).message === NO_HARD_LINKS ? NO_HARD_LINKS : `copy failed (${(error as NodeJS.ErrnoException).code ?? "error"})`)
+    } finally {
+      rmSync(temp, { force: true })
+      hashes.delete(temp)
     }
   }
   return result

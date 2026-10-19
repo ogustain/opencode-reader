@@ -1,12 +1,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readdirSync, readFileSync, statSync } from "node:fs"
+import { closeSync, openSync, readdirSync, readFileSync, statSync, truncateSync } from "node:fs"
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
 import { bufferSource, decodeXml, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
-import { addBooks, bookKey, buildIndex, cacheFile, MAX_NOTE, NO_HARD_LINKS, neoRefs, publishCopy, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
+import { addBooks, bookKey, buildIndex, cacheFile, copyToTemp, MAX_ADD_FILE, MAX_NOTE, NO_HARD_LINKS, neoRefs, publishCopy, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
 /** `size` / `compressed` override the sizes declared in the central directory (malformed archives). */
@@ -429,4 +429,45 @@ test("adding books: a file system without hard links refuses the copy and leaves
   assert.equal(publishCopy(temp, dir, "book.epub"), join(dir, "book (2).epub"))
   assert.deepEqual(readdirSync(dir).sort(), ["book (2).epub", "book.epub"])
   assert.equal(readFileSync(join(dir, "book.epub"), "utf8"), "first")
+})
+
+test("adding books: a source over the cap is refused, counted as it is read, and leaves no temp file", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  // A sparse file: its size is over the cap, without the bytes on disk.
+  const big = join(from, "big.epub")
+  await writeFile(big, sampleEpub())
+  truncateSync(big, MAX_ADD_FILE + 1)
+  assert.deepEqual(addBooks(big, dir), { added: [], skipped: [{ name: "big.epub", reason: "too large" }] })
+  assert.deepEqual(readdirSync(dir), [])
+
+  // A file that grows past the cap after it was checked: the copy stops at the cap.
+  const small = join(from, "small.epub")
+  await writeFile(small, sampleEpub())
+  const fd = openSync(small, "r")
+  try {
+    assert.throws(() => copyToTemp(fd, dir, 100), /too large/)
+  } finally {
+    closeSync(fd)
+  }
+  assert.deepEqual(readdirSync(dir), [])
+})
+
+test("adding books: a book without a title is named after its source file, not the temp copy", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  const source = join(from, "Untitled Story.epub")
+  const untitled = `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/>
+    <manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>`
+  await writeFile(
+    source,
+    zip([
+      { name: "mimetype", data: "application/epub+zip", store: true },
+      { name: "META-INF/container.xml", data: container },
+      { name: "OEBPS/content.opf", data: untitled },
+      { name: "OEBPS/c1.xhtml", data: chapter("One", "<p>Text.</p>") },
+    ]),
+  )
+  const result = addBooks(source, dir)
+  assert.deepEqual(result.added.map((b) => b.title), ["Untitled Story"])
 })
