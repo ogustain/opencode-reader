@@ -133,8 +133,8 @@ What the plugin does, and the only write it ever makes:
    otherwise it is the percentage on `total`, clamped to `1..total-1`
    (`0/1` for an unfinished one-page book).
 4. Save the document as it was to the local backup ring (last 20), and
-   record the attempted write (its reading print and local generation, see
-   below) in `<dataDir>/onyx-sync.json` (last 5 per book).
+   record the attempted write (its reading print and local page-turn time,
+   see below) in `<dataDir>/onyx-sync.json`.
 5. `PUT {gateway}<uid>%23<docUniqueId>` with the `_rev`. A 409 means the
    document changed meanwhile: retry once from step 1.
 
@@ -145,30 +145,13 @@ library row.
 
 ## Deciding a sync
 
-A doc's reading is its **print**: the position fields (as read back) and
-`progress`, normalized. `_rev`, `lastAccess` and the update times are left
-out: opening a book on the device bumps them without moving the reading.
-Locally, each book has a **generation**, bumped by every position change
-(a page turn, or a cloud position applied), shared across windows (the
-highest wins).
-
-`onyx-sync.json` keeps per book the **base**, the last print and generation
-both sides agreed on (a pull applied, a push acknowledged or recognised),
-and our attempted writes. A cloud print equal to a recorded write is ours:
-the base becomes that write's print and generation. Recording before the
-`PUT` means a write whose answer was lost is still known as ours.
-
-The cloud changed when its print differs from the base and is not ours; the
-local reading changed when its generation is past the base's. Neither:
-nothing. One side: it wins, whatever the clocks say. Both: a real conflict,
-the later of the local page-turn time and `user_doc_data_update_time`
-(device clock) wins. Pushing the same position and progress as the cloud's
-writes nothing and records the agreement.
-
-Without a base (older versions, or the file lost), once: a doc last written
-by `"OpenCode"` is ambiguous and never moves the local position (pushed
-over if a page turned here since the last acknowledged push, else taken as
-agreed); any other doc is decided by the clocks.
+Automatic when certain, asked otherwise. `onyx-sync.json` keeps per book the
+base (the agreed `_rev`, reading print without byte range or `progress`, and
+local page-turn time) and one attempted write. The cloud changed when `_rev`
+and print both differ from the base; the local side when a page turned
+after it. Only one side changed: it wins. Neither, or the same position:
+agreed. Both, or no base: ask. Device clocks are never compared. An attempt
+found in the cloud under a new `_rev` is ours (its answer was lost).
 
 ## Book files (OSS)
 

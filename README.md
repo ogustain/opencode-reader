@@ -175,26 +175,14 @@ The BOOX must be awake and unlocked for ADB to answer.
 Sync applies to books opened through `/books` (books from `dir` are not
 matched with the BOOX library).
 
-- **BOOX → OpenCode.** Opening a book, and opening the panel, read the book's
-  cloud record (never on a timer; opening the panel at most once a minute per
-  book, opening a book every time). When the BOOX read the book further
-  since the two sides last agreed (see below), the book jumps to the BOOX
-  position, to the character, and a toast says so.
-- **OpenCode → BOOX.** Closing the panel, switching books, or
-  `pushIdleMinutes` without a page turn send the position, but only when you
-  moved here since the two sides last agreed. A send that failed or was cut
-  short (OpenCode quit meanwhile) is offered again once at the next start or
-  panel opening, through the same decision (if the BOOX read further
-  meanwhile, its position is taken instead). On the BOOX, open the
-  book and **accept the sync pop-up**: NeoReader jumps to the OpenCode
-  position.
-- **Who is newer.** The plugin remembers, per book, the last reading both
-  sides agreed on: the cloud's position and progress, and a local counter
-  bumped by every move here. Opening the book on the BOOX without reading
-  changes neither. When only one side moved since, it wins, whatever the
-  clocks say; the plugin's own writes count as agreed. If the BOOX read on
-  **and** you turned pages here too, it is a real conflict: the most recent
-  of the two times wins (BOOX clock against this computer's clock).
+- **Automatic when certain, asked otherwise.** If only the BOOX read since
+  the last agreement, opening the book or the panel jumps to its position;
+  if only you read here, closing the panel, switching books or
+  `pushIdleMinutes` idle send yours. Read on both sides (or here before any sync):
+  opening the book asks which to keep, or later; meanwhile the panel says
+  "Read on both sides — open the book to choose". Opening a book on the BOOX
+  is not reading; clocks are never compared. Failed sends retry once at the
+  next start. On the BOOX, **accept the sync pop-up** to jump there.
 
 Protocol details for contributors are in
 [docs/onyx-cloud.md](docs/onyx-cloud.md).
