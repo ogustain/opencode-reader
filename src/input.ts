@@ -23,6 +23,13 @@ export function cleanPath(input: string): string {
   return path.trim()
 }
 
+/**
+ * True for text that can name a file: absolute, `~` or relative to the
+ * current folder. A PDF or image dropped into OpenCode's prompt becomes an
+ * attachment, and the command receives its label instead of a path.
+ */
+export const looksLikePath = (path: string) => /^(\/|~(\/|$)|\.\.?(\/|$))/.test(path)
+
 /** The argument of a slash command, with or without the command itself in front. */
 export function commandArgument(input: string | undefined, name: string): string {
   const text = (input ?? "").trim()

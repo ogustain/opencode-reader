@@ -20,7 +20,7 @@
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
-import { addSummary, alreadyIn, cleanPath, commandArgument } from "./input"
+import { addSummary, alreadyIn, cleanPath, commandArgument, looksLikePath } from "./input"
 import type { OnyxState } from "./onyx"
 import {
   booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextScreen, notesBetween, previousScreen,
@@ -540,6 +540,8 @@ export default Plugin.define({
       }
       const source = cleanPath(path ?? "")
       if (!source) return
+      if (!looksLikePath(source))
+        return toast("Not a file path. Only EPUB files can be added (OpenCode turns a dropped PDF or image into an attachment).", "warning")
       const result = (await reader.add({ path: source }).catch(() => undefined)) as AddResult | undefined
       if (!result) return toast("Reader server plugin unavailable.", "error")
       const summary = addSummary(result)

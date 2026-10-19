@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { addSummary, cleanPath, cleanToken, commandArgument } from "./input.ts"
+import { addSummary, cleanPath, cleanToken, commandArgument, looksLikePath } from "./input.ts"
 
 test("dragged paths lose their quotes and backslash escapes", () => {
   assert.equal(cleanPath("  /Users/me/My\\ Books/a\\ \\(1\\).epub "), "/Users/me/My Books/a (1).epub")
@@ -42,4 +42,9 @@ test("the add summary counts each outcome", () => {
     "1 moved to the library · 1 copied; original kept (symbolic link) · 1 already in the library (removed from Downloads)",
   )
   assert.equal(addSummary({ added: [], skipped: [] }), "")
+})
+
+test("only text that can name a file counts as a path", () => {
+  for (const path of ["/Users/a/b.epub", "~/Downloads/b.epub", "~", "./b.epub", "../b.epub"]) assert.equal(looksLikePath(path), true, path)
+  for (const path of ["[PDF 1]", "[Image 1]", "b.epub", "~other/b.epub", ""]) assert.equal(looksLikePath(path), false, path)
 })

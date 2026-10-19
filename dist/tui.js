@@ -29,7 +29,7 @@ import { createElement as _$createElement } from "@opentui/solid";
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
-import { addSummary, alreadyIn, cleanPath, commandArgument } from "../src/input.ts";
+import { addSummary, alreadyIn, cleanPath, commandArgument, looksLikePath } from "../src/input.ts";
 import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextScreen, notesBetween, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
 import { batchSummary, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE } from "../src/sync.ts";
@@ -643,6 +643,7 @@ export default Plugin.define({
       }
       const source = cleanPath(path ?? "");
       if (!source) return;
+      if (!looksLikePath(source)) return toast("Not a file path. Only EPUB files can be added (OpenCode turns a dropped PDF or image into an attachment).", "warning");
       const result = await reader.add({
         path: source
       }).catch(() => undefined);
