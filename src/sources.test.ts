@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AdbError } from "./adb.ts"
@@ -182,4 +182,14 @@ test("a refused token is reported as such even when ADB copies the book, and the
   })
   assert.deepEqual(await fetchFile("/a.epub", join(dir, "a.epub"), 10, { cloud: false }), { ok: false, error: NOT_HERE, notHere: true })
   assert.equal(downloads, 0)
+})
+
+test("the books folder is created 0700 and an ADB copy is kept 0600", async () => {
+  const data = join(mkdtempSync(join(tmpdir(), "fetch-")), "data")
+  const file = join(data, "books", "book.epub")
+  const fetchFile = createFetcher({ cloud: () => undefined, pull: async (_path, local) => writeFileSync(local, BOOK, { mode: 0o644 }) })
+  assert.deepEqual(await fetchFile("/b.epub", file, BOOK.length), { ok: true, source: "adb" })
+  assert.equal(statSync(data).mode & 0o777, 0o700)
+  assert.equal(statSync(join(data, "books")).mode & 0o777, 0o700)
+  assert.equal(statSync(file).mode & 0o777, 0o600)
 })

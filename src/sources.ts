@@ -3,7 +3,7 @@
  * uploaded to the Onyx cloud first (no cable), then ADB.
  */
 import { randomBytes } from "node:crypto"
-import { mkdirSync, rmSync, statSync } from "node:fs"
+import { chmodSync, mkdirSync, rmSync, statSync } from "node:fs"
 import { dirname } from "node:path"
 import { AdbError } from "./adb.ts"
 import { EXPIRED_MESSAGE, OnyxError, publishFile } from "./onyx.ts"
@@ -67,12 +67,13 @@ export function createFetcher(deps: {
   const running = new Map<string, Promise<Fetched>>()
   const fetchOnce = async (booxPath: string, file: string, size: number, useCloud: boolean): Promise<Fetched> => {
     if (isCached(file, size)) return { ok: true, source: "cache" }
-    mkdirSync(dirname(file), { recursive: true })
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 }) // The data dir and books/ are the user's only.
     const download = useCloud ? deps.cloud() : undefined
     const fromBoox = async () => {
       const temp = `${file}.${randomBytes(4).toString("hex")}.part`
       try {
         await deps.pull(booxPath, temp)
+        chmodSync(temp, 0o600) // adb pull may keep the device's mode.
         const got = statSync(temp).size
         if (size > 0 && got !== size) throw new Error(`incomplete copy (${got} of ${size} bytes)`)
         publishFile(temp, file, size)

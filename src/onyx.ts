@@ -428,9 +428,9 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       throw new OnyxError("error", "the cloud file is not the Boox file")
     }
 
-    mkdirSync(dirname(dest), { recursive: true })
+    mkdirSync(dirname(dest), { recursive: true, mode: 0o700 })
     const partial = `${dest}.${randomBytes(4).toString("hex")}.part`
-    const fd = openSync(partial, "w")
+    const fd = openSync(partial, "wx", 0o600)
     let open = true
     const close = () => {
       if (open) closeSync(fd)

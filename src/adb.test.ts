@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { mkdtemp, readFile } from "node:fs/promises"
+import { mkdtemp, readFile, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AdbError, booxBooks, createAdb, parseDevices, parseProgress, parseRows, shellQuote } from "./adb.ts"
@@ -96,6 +96,7 @@ test("pull falls back to exec-out cat with a quoted path, and accepts only a ZIP
   }
   await fake(failPull, zipBytes).pull(remote, join(dir, "a.epub"))
   assert.deepEqual(await readFile(join(dir, "a.epub")), zipBytes)
+  assert.equal((await stat(join(dir, "a.epub"))).mode & 0o777, 0o600)
   assert.deepEqual(calls.find((a) => a[2] === "pull"), ["-s", "abc", "pull", remote, join(dir, "a.epub")])
   assert.deepEqual(calls.find((a) => a[2] === "exec-out"), ["-s", "abc", "exec-out", "cat", `'/sdcard/Books/L’été d'\\''un homme.epub'`])
   await assert.rejects(fake(failPull, Buffer.from("cat: No such file or directory")).pull(remote, join(dir, "b.epub")), /copy from the Boox failed/)

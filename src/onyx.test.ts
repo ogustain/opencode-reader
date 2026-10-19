@@ -292,6 +292,9 @@ test("a book file downloads with signed requests, and the credentials are reused
   assert.equal(await onyx.downloadBook(bookDoc(), join(dir, "book.epub"), EPUB.length), EPUB.length)
   assert.ok(readFileSync(join(dir, "book.epub")).equals(EPUB))
   assert.deepEqual(readdirSync(dir), ["book.epub"])
+  assert.equal(statSync(join(dir, "book.epub")).mode & 0o777, 0o600)
+  await onyx.downloadBook(bookDoc(), join(dir, "new", "book.epub"))
+  assert.equal(statSync(join(dir, "new")).mode & 0o777, 0o700)
   const get = storage.calls.find((c) => c.url.includes("aliyuncs.com"))!
   assert.equal(get.method, "GET")
   assert.equal(get.headers["x-oss-security-token"], STS_TOKEN)

@@ -205,7 +205,7 @@ export function createAdb(options: { bin?: unknown; serial?: unknown; run?: Run 
       // exec-out exits 0 and prints cat's error on stdout: accept only a ZIP.
       const data = await run(["-s", serial, "exec-out", "cat", shellQuote(remote)], { timeout: 120_000 })
       if (data.length < 4 || data.readUInt32LE(0) !== 0x04034b50) throw new AdbError("error", "copy from the Boox failed")
-      await writeFile(local, data)
+      await writeFile(local, data, { mode: 0o600 })
     },
   }
 }

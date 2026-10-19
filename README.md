@@ -125,7 +125,7 @@ the position.
    than on a command line, which would end up in your shell history:
 
    ```sh
-   mkdir -p ~/.local/share/opencode-reader
+   mkdir -p -m 700 ~/.local/share/opencode-reader
    read -rs "TOKEN?Onyx token: "; echo        # zsh; bash: read -rsp "Onyx token: " TOKEN; echo
    (umask 077; printf '%s' "$TOKEN" > ~/.local/share/opencode-reader/onyx-token); unset TOKEN
    chmod 600 ~/.local/share/opencode-reader/onyx-token
