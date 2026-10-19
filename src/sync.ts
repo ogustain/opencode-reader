@@ -352,6 +352,20 @@ export function decidePull(input: {
   return Math.max(input.updateTime, input.lastAccess) > turnedAt
 }
 
+/** Said when the cloud's position cannot be placed in the local copy. */
+export const UNMAPPED_MESSAGE = "the Boox position is in no chapter of this copy"
+
+/**
+ * The cause a failed sync shows once (per book and cause, per session), or
+ * undefined when nothing is to be said: sync off, or an expired token (said
+ * once for all books).
+ */
+export function syncFailure(state: string, error: string | undefined): string | undefined {
+  if (state === "ok" || state === "off" || state === "expired") return undefined
+  if (state === "offline") return "offline: Onyx cloud unreachable"
+  return error || "Onyx cloud error"
+}
+
 /** Whether a due push (`pending`, its page-turn time) is settled by an outcome for the reading of `turnedAt`. */
 export function settles(pending: number | undefined, turnedAt: number): boolean {
   return pending !== undefined && turnedAt >= pending

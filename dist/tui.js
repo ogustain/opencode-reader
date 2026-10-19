@@ -28,7 +28,7 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
 import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
-import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles } from "../src/sync.ts";
+import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE } from "../src/sync.ts";
 const PANEL = "opencode-reader";
 const SIDEBAR_COLUMNS = 37;
 const SAVE_DELAY_MS = 800;
@@ -264,9 +264,22 @@ export default Plugin.define({
         toast(error ?? EXPIRED_MESSAGE, "warning");
       }
     };
+    /** A failed sync of a book: its state, and its cause in a toast once per book and cause this session. */
+    const toldFailures = new Set();
+    const tellFailure = (key, cause) => {
+      if (!cause || toldFailures.has(`${key}\n${cause}`)) return;
+      toldFailures.add(`${key}\n${cause}`);
+      toast(`Boox sync failed: ${cause}`, "warning");
+    };
+    const noteFailure = (key, state, error) => {
+      noteCloud(state, error);
+      tellFailure(key, syncFailure(state, error));
+    };
     /** The "go to N %" hint is for when the cloud cannot carry the position. */
     const cloudCarries = saved => cloudState() === "ok" && saved?.cloud?.state !== "failed";
     const sentToBoox = saved => saved?.cloud?.state === "sent" && (saved.cloud.turnedAt ?? 0) >= saved.updatedAt;
+    /** The last push failed, or the cloud could not be read: the next push or pull tries again. */
+    const syncFailed = saved => saved?.cloud?.state === "failed" || cloudState() === "offline" || cloudState() === "error";
     const snapshot = () => {
       const b = book();
       if (!b) return undefined;
@@ -349,7 +362,7 @@ export default Plugin.define({
         error: failure(e)
       }));
       if (!result.ok) {
-        noteCloud(result.state, result.error);
+        noteFailure(key, result.state, result.error);
         // The cloud still holds the last acknowledged push.
         if (result.state !== "off") setCloud(key, {
           state: "failed",
@@ -446,7 +459,7 @@ export default Plugin.define({
         error: failure(e)
       }));
       if (!result.ok) {
-        noteCloud(result.state, result.error);
+        noteFailure(b.key, result.state, result.error);
         return;
       }
       setCloudState("ok");
@@ -462,6 +475,7 @@ export default Plugin.define({
         spine: c.spine,
         offset: c.offset
       } : undefined;
+      if (!remote && (c.unmapped || c.spine !== undefined)) tellFailure(b.key, UNMAPPED_MESSAGE);
       const pull = {
         turnedAt: readAt(b.key),
         updateTime: c.updateTime,
@@ -1033,10 +1047,10 @@ export default Plugin.define({
               },
               get fallback() {
                 return (() => {
-                  var _el$13 = _$createElement("text");
-                  _$insertNode(_el$13, _$createTextNode(`Loading…`));
-                  _$effect(_$p => _$setProp(_el$13, "fg", theme.text.muted, _$p));
-                  return _el$13;
+                  var _el$15 = _$createElement("text");
+                  _$insertNode(_el$15, _$createTextNode(`Loading…`));
+                  _$effect(_$p => _$setProp(_el$15, "fg", theme.text.muted, _$p));
+                  return _el$15;
                 })();
               },
               get children() {
@@ -1045,19 +1059,19 @@ export default Plugin.define({
                     return screen().lines;
                   },
                   children: line => (() => {
-                    var _el$15 = _$createElement("text");
-                    _$setProp(_el$15, "height", 1);
-                    _$setProp(_el$15, "wrapMode", "none");
-                    _$insert(_el$15, (() => {
+                    var _el$17 = _$createElement("text");
+                    _$setProp(_el$17, "height", 1);
+                    _$setProp(_el$17, "wrapMode", "none");
+                    _$insert(_el$17, (() => {
                       var _c$ = _$memo(() => !!line().heading);
                       return () => _c$() ? (() => {
-                        var _el$16 = _$createElement("b");
-                        _$insert(_el$16, () => line().text || " ");
-                        return _el$16;
+                        var _el$18 = _$createElement("b");
+                        _$insert(_el$18, () => line().text || " ");
+                        return _el$18;
                       })() : line().text || " ";
                     })());
-                    _$effect(_$p => _$setProp(_el$15, "fg", theme.text.base, _$p));
-                    return _el$15;
+                    _$effect(_$p => _$setProp(_el$17, "fg", theme.text.base, _$p));
+                    return _el$17;
                   })()
                 });
               }
@@ -1079,12 +1093,12 @@ export default Plugin.define({
                 return hint();
               },
               children: n => (() => {
-                var _el$17 = _$createElement("text");
-                _$setProp(_el$17, "flexShrink", 0);
-                _$setProp(_el$17, "wrapMode", "none");
-                _$insert(_el$17, () => `Boox: go to ${n()} %`);
-                _$effect(_$p => _$setProp(_el$17, "fg", theme.text.feedback.warning.base, _$p));
-                return _el$17;
+                var _el$19 = _$createElement("text");
+                _$setProp(_el$19, "flexShrink", 0);
+                _$setProp(_el$19, "wrapMode", "none");
+                _$insert(_el$19, () => `Boox: go to ${n()} %`);
+                _$effect(_$p => _$setProp(_el$19, "fg", theme.text.feedback.warning.base, _$p));
+                return _el$19;
               })()
             }), null);
             _$insert(_el$9, _$createComponent(Show, {
@@ -1102,26 +1116,39 @@ export default Plugin.define({
             }), null);
             _$insert(_el$9, _$createComponent(Show, {
               get when() {
-                return notice() || booxStatus();
+                return _$memo(() => !!(!!b().booxPath && !sentToBoox(saved())))() && syncFailed(saved());
               },
               get children() {
                 var _el$11 = _$createElement("text");
-                _$setProp(_el$11, "flexShrink", 1);
+                _$insertNode(_el$11, _$createTextNode(`Sync failed — will retry`));
+                _$setProp(_el$11, "flexShrink", 0);
                 _$setProp(_el$11, "wrapMode", "none");
-                _$insert(_el$11, () => notice() || booxStatus());
-                _$effect(_$p => _$setProp(_el$11, "fg", theme.text.muted, _$p));
+                _$effect(_$p => _$setProp(_el$11, "fg", theme.text.feedback.warning.base, _$p));
                 return _el$11;
+              }
+            }), null);
+            _$insert(_el$9, _$createComponent(Show, {
+              get when() {
+                return notice() || booxStatus();
+              },
+              get children() {
+                var _el$13 = _$createElement("text");
+                _$setProp(_el$13, "flexShrink", 1);
+                _$setProp(_el$13, "wrapMode", "none");
+                _$insert(_el$13, () => notice() || booxStatus());
+                _$effect(_$p => _$setProp(_el$13, "fg", theme.text.muted, _$p));
+                return _el$13;
               }
             }), null);
             _$effect(_$p => _$setProp(_el$0, "fg", theme.text.muted, _$p));
             return _el$9;
           })(), (() => {
-            var _el$12 = _$createElement("text");
-            _$setProp(_el$12, "height", 1);
-            _$setProp(_el$12, "wrapMode", "none");
-            _$insert(_el$12, () => fit(props.panel.focused ? "←/→ page · t contents · s settings · f fullscreen · q close" : "click to read", width()));
-            _$effect(_$p => _$setProp(_el$12, "fg", props.panel.focused ? theme.text.base : theme.text.muted, _$p));
-            return _el$12;
+            var _el$14 = _$createElement("text");
+            _$setProp(_el$14, "height", 1);
+            _$setProp(_el$14, "wrapMode", "none");
+            _$insert(_el$14, () => fit(props.panel.focused ? "←/→ page · t contents · s settings · f fullscreen · q close" : "click to read", width()));
+            _$effect(_$p => _$setProp(_el$14, "fg", props.panel.focused ? theme.text.base : theme.text.muted, _$p));
+            return _el$14;
           })()]
         }));
         return _el$;
@@ -1159,63 +1186,63 @@ export default Plugin.define({
           return shown();
         },
         children: s => (() => {
-          var _el$18 = _$createElement("box"),
-            _el$19 = _$createElement("box"),
-            _el$20 = _$createElement("text"),
-            _el$21 = _$createElement("text"),
-            _el$22 = _$createElement("b"),
-            _el$24 = _$createElement("box");
-          _$insertNode(_el$18, _el$19);
-          _$setProp(_el$18, "flexDirection", "column");
-          _$insertNode(_el$19, _el$20);
-          _$insertNode(_el$19, _el$21);
-          _$insertNode(_el$19, _el$24);
-          _$setProp(_el$19, "flexDirection", "row");
-          _$setProp(_el$19, "gap", 1);
-          _$setProp(_el$19, "onMouseUp", () => void setView(draft => void (draft.open = !draft.open)).catch(() => {}));
-          _$setProp(_el$20, "flexShrink", 0);
-          _$insert(_el$20, () => view.open ? "▼" : "▶");
+          var _el$20 = _$createElement("box"),
+            _el$21 = _$createElement("box"),
+            _el$22 = _$createElement("text"),
+            _el$23 = _$createElement("text"),
+            _el$24 = _$createElement("b"),
+            _el$26 = _$createElement("box");
+          _$insertNode(_el$20, _el$21);
+          _$setProp(_el$20, "flexDirection", "column");
           _$insertNode(_el$21, _el$22);
-          _$setProp(_el$21, "flexShrink", 0);
-          _$insertNode(_el$22, _$createTextNode(`Reading`));
-          _$setProp(_el$24, "flexGrow", 1);
-          _$insert(_el$19, _$createComponent(Show, {
+          _$insertNode(_el$21, _el$23);
+          _$insertNode(_el$21, _el$26);
+          _$setProp(_el$21, "flexDirection", "row");
+          _$setProp(_el$21, "gap", 1);
+          _$setProp(_el$21, "onMouseUp", () => void setView(draft => void (draft.open = !draft.open)).catch(() => {}));
+          _$setProp(_el$22, "flexShrink", 0);
+          _$insert(_el$22, () => view.open ? "▼" : "▶");
+          _$insertNode(_el$23, _el$24);
+          _$setProp(_el$23, "flexShrink", 0);
+          _$insertNode(_el$24, _$createTextNode(`Reading`));
+          _$setProp(_el$26, "flexGrow", 1);
+          _$insert(_el$21, _$createComponent(Show, {
             get when() {
               return !view.open;
             },
             get children() {
-              var _el$25 = _$createElement("text");
-              _$setProp(_el$25, "flexShrink", 0);
-              _$setProp(_el$25, "wrapMode", "none");
-              _$insert(_el$25, () => pct(value()));
-              _$effect(_$p => _$setProp(_el$25, "fg", hint() ? theme.text.feedback.warning.base : theme.text.muted, _$p));
-              return _el$25;
+              var _el$27 = _$createElement("text");
+              _$setProp(_el$27, "flexShrink", 0);
+              _$setProp(_el$27, "wrapMode", "none");
+              _$insert(_el$27, () => pct(value()));
+              _$effect(_$p => _$setProp(_el$27, "fg", hint() ? theme.text.feedback.warning.base : theme.text.muted, _$p));
+              return _el$27;
             }
           }), null);
-          _$insert(_el$18, _$createComponent(Show, {
+          _$insert(_el$20, _$createComponent(Show, {
             get when() {
               return view.open;
             },
             get children() {
               return [(() => {
-                var _el$26 = _$createElement("box"),
-                  _el$27 = _$createElement("text");
-                _$insertNode(_el$26, _el$27);
-                _$setProp(_el$26, "onMouseUp", () => void reopen());
-                _$setProp(_el$27, "wrapMode", "none");
-                _$insert(_el$27, () => `📖 ${fit(s().title, SIDEBAR_COLUMNS - 3 - 3 - pct(value()).length)} — ${pct(value())}`);
-                _$effect(_$p => _$setProp(_el$27, "fg", theme.text.base, _$p));
-                return _el$26;
+                var _el$28 = _$createElement("box"),
+                  _el$29 = _$createElement("text");
+                _$insertNode(_el$28, _el$29);
+                _$setProp(_el$28, "onMouseUp", () => void reopen());
+                _$setProp(_el$29, "wrapMode", "none");
+                _$insert(_el$29, () => `📖 ${fit(s().title, SIDEBAR_COLUMNS - 3 - 3 - pct(value()).length)} — ${pct(value())}`);
+                _$effect(_$p => _$setProp(_el$29, "fg", theme.text.base, _$p));
+                return _el$28;
               })(), _$createComponent(Show, {
                 get when() {
                   return hint();
                 },
                 children: n => (() => {
-                  var _el$28 = _$createElement("text");
-                  _$setProp(_el$28, "wrapMode", "none");
-                  _$insert(_el$28, () => `Boox: go to ${n()} %`);
-                  _$effect(_$p => _$setProp(_el$28, "fg", theme.text.feedback.warning.base, _$p));
-                  return _el$28;
+                  var _el$30 = _$createElement("text");
+                  _$setProp(_el$30, "wrapMode", "none");
+                  _$insert(_el$30, () => `Boox: go to ${n()} %`);
+                  _$effect(_$p => _$setProp(_el$30, "fg", theme.text.feedback.warning.base, _$p));
+                  return _el$30;
                 })()
               })];
             }
@@ -1223,14 +1250,14 @@ export default Plugin.define({
           _$effect(_p$ => {
             var _v$ = theme.text.base,
               _v$2 = theme.text.base;
-            _v$ !== _p$.e && (_p$.e = _$setProp(_el$20, "fg", _v$, _p$.e));
-            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$21, "fg", _v$2, _p$.t));
+            _v$ !== _p$.e && (_p$.e = _$setProp(_el$22, "fg", _v$, _p$.e));
+            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$23, "fg", _v$2, _p$.t));
             return _p$;
           }, {
             e: undefined,
             t: undefined
           });
-          return _el$18;
+          return _el$20;
         })()
       });
     }

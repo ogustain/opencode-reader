@@ -287,6 +287,7 @@ export default Plugin.define({
               lastAccess: reading.lastAccess,
               ...(reading.deviceModel ? { deviceModel: reading.deviceModel } : {}),
               side,
+              ...(reading.point && !local ? { unmapped: true as const } : {}),
             },
           }
         } catch (error) {

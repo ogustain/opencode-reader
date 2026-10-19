@@ -52,6 +52,8 @@ export type CloudPosition = {
   deviceModel?: string
   /** Whether the cloud holds one of our writes (the server's record of them). */
   side?: CloudSide
+  /** The cloud has a reading position, but in no chapter of this copy. */
+  unmapped?: true
 }
 export type PullResult = { ok: true; cloud: CloudPosition } | { ok: false; state: OnyxState; error: string }
 export type PushResult =

@@ -26,7 +26,9 @@ import {
   ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type OpenResult,
   type PullResult, type PushResult, type SyncSettings,
 } from "./rpc"
-import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, type OwnPush, type TreeNode } from "./sync"
+import {
+  decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE, type OwnPush, type TreeNode,
+} from "./sync"
 import type { Paragraph } from "./text"
 
 const PANEL = "opencode-reader"
@@ -243,9 +245,22 @@ export default Plugin.define({
         toast(error ?? EXPIRED_MESSAGE, "warning")
       }
     }
+    /** A failed sync of a book: its state, and its cause in a toast once per book and cause this session. */
+    const toldFailures = new Set<string>()
+    const tellFailure = (key: string, cause: string | undefined) => {
+      if (!cause || toldFailures.has(`${key}\n${cause}`)) return
+      toldFailures.add(`${key}\n${cause}`)
+      toast(`Boox sync failed: ${cause}`, "warning")
+    }
+    const noteFailure = (key: string, state: OnyxState, error?: string) => {
+      noteCloud(state, error)
+      tellFailure(key, syncFailure(state, error))
+    }
     /** The "go to N %" hint is for when the cloud cannot carry the position. */
     const cloudCarries = (saved: Saved | undefined) => cloudState() === "ok" && saved?.cloud?.state !== "failed"
     const sentToBoox = (saved: Saved | undefined) => saved?.cloud?.state === "sent" && (saved.cloud.turnedAt ?? 0) >= saved.updatedAt
+    /** The last push failed, or the cloud could not be read: the next push or pull tries again. */
+    const syncFailed = (saved: Saved | undefined) => saved?.cloud?.state === "failed" || cloudState() === "offline" || cloudState() === "error"
 
     const snapshot = (): Snapshot | undefined => {
       const b = book()
@@ -303,7 +318,7 @@ export default Plugin.define({
         .push({ path: s.book.path, booxPath: s.book.booxPath, spine: s.position.spine, offset: s.position.offset, percent: s.percent, finished: s.finished, turnedAt: s.turnedAt, ...(own ? { own } : {}) })
         .catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PushResult
       if (!result.ok) {
-        noteCloud(result.state, result.error)
+        noteFailure(key, result.state, result.error)
         // The cloud still holds the last acknowledged push.
         if (result.state !== "off") setCloud(key, { state: "failed", at: Date.now(), ...(ack ?? {}) })
         return
@@ -363,7 +378,7 @@ export default Plugin.define({
       const basis = Math.max(readAt(b.key), store.books[b.key]?.updatedAt ?? 0)
       const result = (await reader.pull({ path: b.path, booxPath: b.booxPath, ...(basis ? { turnedAt: basis } : {}) }).catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PullResult
       if (!result.ok) {
-        noteCloud(result.state, result.error)
+        noteFailure(b.key, result.state, result.error)
         return
       }
       setCloudState("ok")
@@ -373,6 +388,7 @@ export default Plugin.define({
       // The reader moved meanwhile: their move wins.
       if (book()?.key !== b.key || position() !== before) return
       const remote = c.spine !== undefined && c.offset !== undefined && c.spine < b.chapters.length ? { spine: c.spine, offset: c.offset } : undefined
+      if (!remote && (c.unmapped || c.spine !== undefined)) tellFailure(b.key, UNMAPPED_MESSAGE)
       const pull = {
         turnedAt: readAt(b.key),
         updateTime: c.updateTime,
@@ -827,6 +843,9 @@ export default Plugin.define({
                   </Show>
                   <Show when={sentToBoox(saved())}>
                     <text flexShrink={0} wrapMode="none" fg={theme.text.feedback.success.base}>Sent to Boox</text>
+                  </Show>
+                  <Show when={!!b().booxPath && !sentToBoox(saved()) && syncFailed(saved())}>
+                    <text flexShrink={0} wrapMode="none" fg={theme.text.feedback.warning.base}>Sync failed — will retry</text>
                   </Show>
                   <Show when={notice() || booxStatus()}>
                     <text flexShrink={1} wrapMode="none" fg={theme.text.muted}>{notice() || booxStatus()}</text>

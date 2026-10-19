@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mapChapter } from "./neoposition.ts"
 import {
-  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, pendingPushes, progressFor, pushQueue, settles, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
+  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, pendingPushes, progressFor, pushQueue, settles, syncFailure, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
   type NeoRef,
 } from "./sync.ts"
 
@@ -344,4 +344,15 @@ test("a due push stays due until settled, and is replayed once per session", () 
   assert.deepEqual(pendingPushes(books, replayed), ["due", "other"])
   replayed.add("due").add("other")
   assert.deepEqual(pendingPushes(books, replayed), [])
+})
+
+test("a failed sync names its cause, except when sync is off or the token expired", () => {
+  assert.equal(syncFailure("error", "Onyx cloud: HTTP 500"), "Onyx cloud: HTTP 500")
+  assert.equal(syncFailure("offline", "Onyx cloud unreachable"), "offline: Onyx cloud unreachable")
+  assert.equal(syncFailure("error", "no reading position in the cloud yet: open the book once on the BOOX"), "no reading position in the cloud yet: open the book once on the BOOX")
+  assert.equal(syncFailure("conflict", "Onyx cloud: the book changed meanwhile"), "Onyx cloud: the book changed meanwhile")
+  assert.equal(syncFailure("error", ""), "Onyx cloud error")
+  assert.equal(syncFailure("off", "Onyx cloud not configured (see README)"), undefined)
+  assert.equal(syncFailure("expired", "Onyx token expired"), undefined)
+  assert.equal(syncFailure("ok", undefined), undefined)
 })
