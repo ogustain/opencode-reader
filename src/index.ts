@@ -25,7 +25,7 @@ import {
 } from "./library.ts"
 import type { ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
-import { createFetcher, createLock } from "./sources.ts"
+import { createFetcher, createLock, liveCopies, type CacheManifest } from "./sources.ts"
 import {
   createOnyx, defaultBackupFile, defaultSessionFile, defaultSyncFile, defaultTokenFile, OnyxError, readMarks, saveBackup, updateMark, type CloudDoc,
   type OnyxState,
@@ -43,7 +43,6 @@ const BOOX_MIN_INTERVAL_MS = 60_000
 const CLOUD_MIN_INTERVAL_MS = 60_000
 
 type Json = Parameters<Plugin.Context["storage"]["set"]>[1]
-type CacheManifest = Record<string, { booxPath: string; size: number }>
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 const stateOf = (error: unknown): OnyxState => (error instanceof OnyxError ? error.state : "error")
@@ -104,12 +103,26 @@ export default Plugin.define({
       }
     }
 
+    // Book files: the cached copy, else the cloud copy (downloaded beside the file), else ADB.
+    const manifestLock = createLock()
+    /** The cache manifest, without (and pruned of) the copies deleted since. */
+    const cacheManifest = async (): Promise<CacheManifest> => {
+      const manifest = (await load<CacheManifest>("cache")) ?? {}
+      const live = liveCopies(manifest)
+      if (Object.keys(live).length === Object.keys(manifest).length) return live
+      return manifestLock(async () => {
+        const current = liveCopies((await load<CacheManifest>("cache")) ?? {})
+        await save("cache", current)
+        return current
+      })
+    }
+
     let listing: BooxListing = (await load<BooxListing>("boox")) ?? { state: "none", message: "Boox not checked yet", books: [] }
     let lastAsked = 0
     let asking: Promise<BooxListing> | undefined
     const askBoox = async (): Promise<BooxListing> => {
       lastAsked = Date.now()
-      const manifest = (await load<CacheManifest>("cache")) ?? {}
+      const manifest = await cacheManifest()
       const cachedBy = new Map(Object.entries(manifest).map(([file, m]) => [`${m.booxPath}:${m.size}`, file]))
       try {
         const books = await adb.listBooks()
@@ -175,8 +188,6 @@ export default Plugin.define({
     const backupFile = defaultBackupFile(dataDir)
     // Our writes per book doc, recorded before each PUT (see `CloudMark`).
     const syncFile = defaultSyncFile(dataDir)
-    // Book files: the cached copy, else the cloud copy (downloaded beside the file), else ADB.
-    const manifestLock = createLock()
     // Pushes of one book doc run one at a time (several windows may push it).
     const docLocks = new Map<string, ReturnType<typeof createLock>>()
     const docLock = (id: string) => docLocks.get(id) ?? docLocks.set(id, createLock()).get(id)!
@@ -194,7 +205,7 @@ export default Plugin.define({
 
     const registration = await ctx.rpc.register(ReaderRpc, {
       library: async () => {
-        const manifest = (await load<CacheManifest>("cache")) ?? {}
+        const manifest = await cacheManifest()
         const files = [...scanEpubs(dir), ...Object.keys(manifest).filter((file) => within(file, [cacheDir]))]
         const books = files.map((path) => entry(path, manifest)).filter((b): b is BookEntry => !!b)
         return { dir, books }
@@ -257,7 +268,7 @@ export default Plugin.define({
         if (refresh && Date.now() - lastCloud >= CLOUD_MIN_INTERVAL_MS) await askCloud()
         else if (cloudAsking) await cloudAsking
         if (!onyx.configured()) cloud = { ...cloud, state: "off", message: "Onyx cloud not configured (see README)" }
-        const manifest = (await load<CacheManifest>("cache")) ?? {}
+        const manifest = await cacheManifest()
         const cachedBy = new Map(Object.entries(manifest).map(([file, m]) => [`${m.booxPath}:${m.size}`, file]))
         const books = cloud.books.map((b) => {
           const cached = cachedBy.get(`${b.path}:${b.size}`)

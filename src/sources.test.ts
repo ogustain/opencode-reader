@@ -1,11 +1,11 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AdbError } from "./adb.ts"
 import { createOnyx, EXPIRED_MESSAGE, OnyxError, publishFile } from "./onyx.ts"
-import { createFetcher, createLock, NOT_HERE, obtainBook } from "./sources.ts"
+import { createFetcher, createLock, liveCopies, NOT_HERE, obtainBook } from "./sources.ts"
 
 const fail = (error: Error) => async () => {
   throw error
@@ -192,4 +192,24 @@ test("the books folder is created 0700 and an ADB copy is kept 0600", async () =
   assert.equal(statSync(data).mode & 0o777, 0o700)
   assert.equal(statSync(join(data, "books")).mode & 0o777, 0o700)
   assert.equal(statSync(file).mode & 0o777, 0o600)
+})
+
+test("a cached copy deleted or emptied since is no longer announced", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sources-"))
+  try {
+    const kept = join(dir, "kept.epub")
+    const emptied = join(dir, "emptied.epub")
+    writeFileSync(kept, "PK")
+    writeFileSync(emptied, "")
+    const manifest = {
+      [kept]: { booxPath: "/Books/kept.epub", size: 2 },
+      [emptied]: { booxPath: "/Books/emptied.epub", size: 2 },
+      [join(dir, "deleted.epub")]: { booxPath: "/Books/deleted.epub", size: 2 },
+    }
+    assert.deepEqual(liveCopies(manifest), { [kept]: { booxPath: "/Books/kept.epub", size: 2 } })
+    rmSync(kept)
+    assert.deepEqual(liveCopies(manifest), {})
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

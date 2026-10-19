@@ -45,6 +45,22 @@ export async function obtainBook(sources: { cloud?: () => Promise<unknown>; adb:
 
 export type Fetched = { ok: true; source: "cache" | "cloud" | "adb"; expired?: true } | { ok: false; error: string; notHere?: true; expired?: true }
 
+/** Cached book files (by resolved path): the Boox path and size of each. */
+export type CacheManifest = Record<string, { booxPath: string; size: number }>
+
+/** The manifest without the copies that are gone or empty (deleted or truncated since). */
+export function liveCopies(manifest: CacheManifest): CacheManifest {
+  return Object.fromEntries(
+    Object.entries(manifest).filter(([file]) => {
+      try {
+        return statSync(file).size > 0
+      } catch {
+        return false
+      }
+    }),
+  )
+}
+
 /** The cached copy counts when it has the Boox size (any copy when the size is unknown). */
 export function isCached(file: string, size: number): boolean {
   try {
