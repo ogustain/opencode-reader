@@ -35,7 +35,7 @@ import {
   type PushResult,
 } from "./rpc.ts"
 import {
-  cloudLibrary, pullDoc, pushDoc, toLocal, toNeo, withBase, withPushedProgress, type CloudLibrary, type DocIo, type LocalReading, type NeoRef,
+  cloudLibrary, pullDoc, pushDoc, toLocal, toNeo, validMark, withPushedProgress, type CloudLibrary, type DocIo, type LocalReading, type NeoRef,
 } from "./sync.ts"
 
 const BOOX_MIN_INTERVAL_MS = 60_000
@@ -45,10 +45,10 @@ type Json = Parameters<Plugin.Context["storage"]["set"]>[1]
 
 /** The local reading sent by the TUI: `gen`, `turnedAt` and an optional `receipt`; undefined when invalid. */
 function readingOf(input: Record<string, unknown>): LocalReading | undefined {
-  const { gen, turnedAt, receipt } = input
+  const { spine, offset, percent, finished, turnedAt } = input
   const valid = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0
-  if (!valid(gen) || !valid(turnedAt)) return undefined
-  return { gen, turnedAt, ...(valid(receipt) ? { receipt } : {}) }
+  if (!valid(spine) || !valid(offset) || !valid(percent) || !valid(turnedAt)) return undefined
+  return { position: { spine, offset }, percent, finished: finished === true, turnedAt }
 }
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 const stateOf = (error: unknown): OnyxState => (error instanceof OnyxError ? error.state : "error")
@@ -199,8 +199,8 @@ export default Plugin.define({
       getDoc: () => onyx.getDoc(id),
       putDoc: (doc) => onyx.putDoc(doc as CloudDoc),
       isConflict: (error) => stateOf(error) === "conflict",
-      mark: () => readMarks(syncFile)[id],
-      setMark: (change) => void updateMark(syncFile, id, change),
+      mark: () => validMark(readMarks(syncFile)[id]),
+      setMark: (mark) => void updateMark(syncFile, id, () => mark),
       backup: (doc, now) => saveBackup(backupFile, doc as CloudDoc, now),
       toLocal: (point) => toLocal(point, refsOf(path), (spine) => mapOf(path, spine)),
       toNeo: (local) => toNeo(local, refsOf(path), mapOf(path, local.spine)),
@@ -308,21 +308,22 @@ export default Plugin.define({
         }
       },
       agree: async (input) => {
-        const { booxPath, print, gen } = (input ?? {}) as Record<string, unknown>
-        if (typeof booxPath !== "string" || typeof print !== "string" || typeof gen !== "number" || !Number.isFinite(gen)) return { ok: false }
+        const { booxPath, rev, print, turnedAt } = (input ?? {}) as Record<string, unknown>
+        const base = validMark({ base: { rev, print, localAt: turnedAt } }).base
+        if (typeof booxPath !== "string" || !base) return { ok: false }
         try {
           const book = await cloudBook(booxPath)
-          if (book) updateMark(syncFile, book.id, (m) => withBase(m, { cloud: print, local: gen }))
+          if (book) updateMark(syncFile, book.id, () => ({ base }))
           return { ok: !!book }
         } catch {
           return { ok: false }
         }
       },
       push: async (input): Promise<PushResult> => {
-        const { path, booxPath, spine, offset, percent, finished, ...rest } = (input ?? {}) as Record<string, unknown>
+        const { path, booxPath, force, ...rest } = (input ?? {}) as Record<string, unknown>
         if (typeof path !== "string" || !within(path, roots) || typeof booxPath !== "string") return { ok: false, state: "error", error: "invalid book" }
         const local = readingOf(rest)
-        if (!local || ![spine, offset, percent].every((n) => typeof n === "number" && Number.isFinite(n))) return { ok: false, state: "error", error: "invalid position" }
+        if (!local) return { ok: false, state: "error", error: "invalid position" }
         try {
           const book = await cloudBook(booxPath)
           if (!book) return { ok: false, state: "error", error: "book not in the Onyx cloud (sync off for it?)" }
@@ -330,15 +331,12 @@ export default Plugin.define({
           const copy = ((await load<CacheManifest>("cache")) ?? {})[resolve(path)]
           if (!copy || copy.booxPath !== booxPath || (book.size > 0 && copy.size !== book.size))
             return { ok: false, state: "error", error: "the local copy is not the Boox file" }
-          const position = { spine: spine as number, offset: offset as number }
-          const result = await docLock(book.id)(() =>
-            pushDoc(docIo(book.id, path), { ...local, position, percent: percent as number, finished: finished === true }),
-          )
+          const result = await docLock(book.id)(() => pushDoc(docIo(book.id, path), local, force === true))
           if (!result.pushed) return { ok: true, ...result }
           // The cached listing shows the new %, and hides a book finished here, before the next library read.
           cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, result.progress) }
           await save("cloud", cloud)
-          return { ok: true, pushed: true, at: result.at }
+          return { ok: true, pushed: true, at: result.at, agreedAt: result.agreedAt }
         } catch (error) {
           return { ok: false, state: stateOf(error), error: message(error) }
         }

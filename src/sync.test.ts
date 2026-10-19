@@ -171,14 +171,14 @@ test("positions convert through the spine, skipping chapters the plugin does not
 test("pushes run one at a time per book, and the latest waiting snapshot goes next", async () => {
   const sent: Array<[string, number]> = []
   const gates: Array<() => void> = []
-  const push = pushQueue<{ gen: number }>(async (key, s) => {
-    sent.push([key, s.gen])
+  const push = pushQueue<{ turnedAt: number }>(async (key, s) => {
+    sent.push([key, s.turnedAt])
     await new Promise<void>((resolve) => gates.push(resolve))
   })
-  const first = push("a", { gen: 1 })
-  void push("a", { gen: 3 }) // Turned during the push.
-  void push("a", { gen: 2 }) // Older: ignored.
-  void push("b", { gen: 1 }) // Another book: not held up.
+  const first = push("a", { turnedAt: 1 })
+  void push("a", { turnedAt: 3 }) // Turned during the push.
+  void push("a", { turnedAt: 2 }) // Older: ignored.
+  void push("b", { turnedAt: 1 }) // Another book: not held up.
   assert.deepEqual(sent, [["a", 1], ["b", 1]])
   gates.shift()!()
   await new Promise((resolve) => setTimeout(resolve, 0))
@@ -186,7 +186,7 @@ test("pushes run one at a time per book, and the latest waiting snapshot goes ne
   for (const open of gates.splice(0)) open()
   await first
   // Idle again: a new snapshot starts at once.
-  void push("a", { gen: 4 })
+  void push("a", { turnedAt: 4 })
   assert.deepEqual(sent.at(-1), ["a", 4])
   for (const open of gates.splice(0)) open()
 })
@@ -219,18 +219,18 @@ test("a push finishing a book hides it from the cached library at once", () => {
   assert.deepEqual(withPushedProgress(library.books, library.books[0].id, undefined), library.books)
 })
 
-test("a due push stays due until settled, and is replayed once per session", () => {
-  // Due for the reading of generation 7: an answer for an older snapshot does not settle it.
-  assert.equal(settles(7, 6), false)
-  assert.equal(settles(7, 7), true)
-  assert.equal(settles(7, 8), true)
-  assert.equal(settles(0, 0), true)
-  assert.equal(settles(undefined, 8), false)
+test("a due push stays due until an agreement reaches its reading, and is replayed once per session", () => {
+  // Due for the reading turned at 200 (older versions stored the same number): an agreement on an older reading does not settle it.
+  assert.equal(settles(200, 150), false)
+  assert.equal(settles(200, 200), true)
+  assert.equal(settles(200, 250), true)
+  assert.equal(settles(200, undefined), false)
+  assert.equal(settles(undefined, 250), false)
   const books = {
-    due: { pending: 7, booxPath: "/Books/a.epub" },
+    due: { pending: 200, booxPath: "/Books/a.epub" },
     sent: { booxPath: "/Books/b.epub" },
-    local: { pending: 3 }, // Not a Boox book.
-    other: { pending: 0, booxPath: "/Books/d.epub" },
+    local: { pending: 100 }, // Not a Boox book.
+    other: { pending: 50, booxPath: "/Books/d.epub" },
   }
   const replayed = new Set<string>()
   assert.deepEqual(pendingPushes(books, replayed), ["due", "other"])

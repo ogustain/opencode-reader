@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
-  atBookEnd, booxHint, chooseStart, column, contents, fromPercent, isFinished, justify, keepsStored, lastScreen, layout, lineAt, nextChapter, nextGen, nextScreen, previousScreen,
+  atBookEnd, booxHint, chooseStart, column, contents, fromPercent, isFinished, justify, keepsStored, lastScreen, layout, lineAt, nextChapter, nextScreen, previousScreen,
   progressOf, savedFinish, savedTimes, screenAt, toPercent, turnForward,
 } from "./paginate.ts"
 import { chapterLength, type Paragraph } from "./text.ts"
@@ -290,14 +290,10 @@ test("a book is finished at 100 % here, or on the Boox unless read here since", 
 })
 
 test("a window holding an older reading never overwrites a newer stored one", () => {
-  // Window B moved (a page turn, or a Boox position applied) and saved generation 6; window A still holds 5.
-  assert.equal(keepsStored({ gen: 6 }, 5), true)
-  assert.equal(keepsStored({ gen: 6 }, 6), false) // Its own save.
-  assert.equal(keepsStored({ gen: 6 }, 7), false) // A moved since: A wins.
-  assert.equal(keepsStored({}, 0), false) // Saved before generations existed.
+  // Window B turned to a later page at 200 and saved; window A still holds its position read at 100.
+  assert.equal(keepsStored({ updatedAt: 200 }, 100), true)
+  assert.equal(keepsStored({ updatedAt: 200 }, 200), false) // Its own save.
+  assert.equal(keepsStored({ updatedAt: 100 }, 250), false) // A turned a page since: A wins.
+  assert.equal(keepsStored({ updatedAt: 100 }, 0), true) // Opened without turning, after another window read.
   assert.equal(keepsStored(undefined, 0), false)
-  // A move here goes past this window's generation and the stored one.
-  assert.equal(nextGen(5, 6), 7)
-  assert.equal(nextGen(5, undefined), 6)
-  assert.equal(nextGen(8, 6), 9)
 })

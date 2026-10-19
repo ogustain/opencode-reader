@@ -7,10 +7,11 @@
  * saved per book (debounced) in durable storage. Only the current chapter is
  * held, and only the visible lines are rendered.
  *
- * Sync with the Boox, for books copied from it: opening a book or the panel
- * pulls the cloud position when the Boox moved since both last agreed; closing the
- * panel, switching books or `pushIdleMinutes` without a page turn pushes the
- * local position (the server decides, GET then PUT). A push stays due in
+ * Sync with the Boox, for books copied from it, automatic only when certain:
+ * opening a book or the panel pulls the cloud position when only the Boox
+ * moved since both last agreed, and asks when both did; closing the panel,
+ * switching books or `pushIdleMinutes` without a page turn pushes the local
+ * position when only it moved (the server decides, GET then PUT). A push stays due in
  * storage until settled, and is sent again once at the next start or panel
  * opening. Without the cloud, or when a push fails, the panel and the
  * sidebar show "Boox: go to N %".
@@ -19,7 +20,7 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
 import type { OnyxState } from "./onyx"
 import {
-  booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextGen, previousScreen,
+  booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen,
   progressOf, savedFinish, savedTimes, screenAt, turnForward, type Display, type Position,
 } from "./paginate"
 import {
@@ -36,6 +37,7 @@ const SIDEBAR_COLUMNS = 37
 const SAVE_DELAY_MS = 800
 const BOOX_MIN_INTERVAL_MS = 60_000
 const PULL_MIN_INTERVAL_MS = 60_000
+const ASK_HINT = "Read on both sides — open the book to choose"
 
 /** The fields of the host's `session.panel` input (PanelInput) this panel uses. */
 type PanelInput = {
@@ -51,10 +53,8 @@ type Saved = {
   spine: number
   offset: number
   percent: number
-  /** Epoch ms of the last page turn here, 0 before any: the conflict tiebreak with the Boox's last save. */
+  /** Epoch ms of the last page turn here (or Boox position applied), 0 before any. */
   updatedAt: number
-  /** Local generation: bumped by every position change here (a page turn, or a Boox position applied). */
-  gen?: number
   /** Epoch ms of the last opening, for "recent first". */
   openedAt?: number
   /** Path on the Boox, for books copied from it (the ones that sync). */
@@ -63,17 +63,17 @@ type Saved = {
   finished?: boolean
   boox?: { percent: number; lastAccess: number; checkedAt: number }
   /**
-   * Last push: "sent" or "failed". `gen`, `turnedAt`: generation and
-   * page-turn time of the last reading the cloud acknowledged (older versions
-   * kept only `turnedAt`).
+   * Last sync: "sent", "failed", or "ask" (read on both sides: the reader
+   * chooses). `turnedAt`: page-turn time of the last reading the cloud
+   * acknowledged.
    */
-  cloud?: { state: "sent" | "failed"; at: number; gen?: number; turnedAt?: number }
-  /** Generation of a reading whose push is due and not settled yet: sent again after a restart. */
+  cloud?: { state: "sent" | "failed" | "ask"; at: number; turnedAt?: number }
+  /** Page-turn time of a reading whose push is due and not settled yet: sent again after a restart. */
   pending?: number
 }
 type Book = { key: string; path: string; title: string; author?: string; booxPath?: string; chapters: number[]; titles: Array<string | undefined> }
 type CloudEntry = CloudListing["books"][number]
-type Snapshot = { book: Book; position: Position; percent: number; finished: boolean; gen: number; turnedAt: number }
+type Snapshot = { book: Book; position: Position; percent: number; finished: boolean; turnedAt: number }
 
 /** Display settings and their choices, in dialog order. */
 const DISPLAY: { [K in keyof Display]: { title: string; choices: Array<{ value: Display[K]; title: string }> } } = {
@@ -115,6 +115,10 @@ const fit = (text: string, width: number) => {
   const chars = Array.from(text)
   return width <= 0 ? "" : chars.length <= width ? text : chars.slice(0, width - 1).join("") + "…"
 }
+const ago = (ms: number) => {
+  const minutes = Math.max(0, Math.round((Date.now() - ms) / 60_000))
+  return minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min ago` : minutes < 2880 ? `${Math.round(minutes / 60)} h ago` : `${Math.round(minutes / 1440)} d ago`
+}
 const day = (ms: number) => {
   const d = new Date(ms)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
@@ -138,6 +142,8 @@ export default Plugin.define({
     const [notice, setNotice] = createSignal("")
     const [booxStatus, setBooxStatus] = createSignal("")
 
+    // While one of our dialogs is open the panel's keys stay off, so typing in its search box is not read as commands.
+    const [dialogOpen, setDialogOpen] = createSignal(false)
     const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") =>
       context.ui.toast.show({ title: "Reader", message, variant })
     const failure = (error: unknown) => (error instanceof Error ? error.message : String(error))
@@ -155,15 +161,11 @@ export default Plugin.define({
       return b ? progressOf(b.chapters, position(), finished()) : 0
     }
 
-    // The reading held here: its book, the generation of the current position
-    // (bumped past every window's by a turn or an applied Boox position) and
-    // its page-turn time (a turn sets it; 0 before any). Opening keeps the
-    // saved ones. They go with the position, in saves and pushes.
-    let reading = { key: "", gen: 0, turnedAt: 0 }
-    const held = (key: string) => (reading.key === key ? reading : { key, gen: 0, turnedAt: 0 })
-    const bump = (key: string, turnedAt: number) => {
-      reading = { key, gen: nextGen(held(key).gen, store.books[key]?.gen), turnedAt }
-    }
+    // The reading held here: its book and the page-turn time of the current
+    // position (a turn or an applied Boox position sets it; opening keeps the
+    // saved one; 0 before any). It goes with the position, in saves and pushes.
+    let reading = { key: "", turnedAt: 0 }
+    const readAt = (key: string) => (reading.key === key ? reading.turnedAt : 0)
 
     // Debounced save of the current position; flushed on close and unload.
     let saveTimer: ReturnType<typeof setTimeout> | undefined
@@ -176,12 +178,12 @@ export default Plugin.define({
       const value = percent()
       const done = finished()
       const now = Date.now()
-      const { gen, turnedAt } = held(b.key)
+      const turnedAt = readAt(b.key)
       void setStore((draft) => {
         const previous = draft.books[b.key]
         draft.current = b.key
-        // Another window moved later: keep its position, generation and time.
-        if (keepsStored(previous, gen)) {
+        // Another window moved later: keep its position and time.
+        if (keepsStored(previous, turnedAt)) {
           if (opened) previous!.openedAt = now
           return
         }
@@ -194,7 +196,6 @@ export default Plugin.define({
           offset: pos.offset,
           percent: value,
           finished: done,
-          gen,
           ...savedTimes(previous, { turnedAt, opened, now }),
         }
       }).catch(() => {})
@@ -231,7 +232,7 @@ export default Plugin.define({
       const b = book()
       if (!b) return
       if (user) {
-        bump(b.key, Date.now())
+        reading = { key: b.key, turnedAt: Date.now() }
         scheduleIdlePush()
       }
       setFinishedAt(finish ? { key: b.key, ...pos } : undefined)
@@ -266,16 +267,14 @@ export default Plugin.define({
     }
     /** The "go to N %" hint is for when the cloud cannot carry the position. */
     const cloudCarries = (saved: Saved | undefined) => cloudState() === "ok" && saved?.cloud?.state !== "failed"
-    const sentToBoox = (saved: Saved | undefined) =>
-      saved?.cloud?.state === "sent" && (saved.cloud.gen !== undefined ? saved.cloud.gen >= (saved.gen ?? 0) : (saved.cloud.turnedAt ?? 0) >= saved.updatedAt)
+    const sentToBoox = (saved: Saved | undefined) => saved?.cloud?.state === "sent" && (saved.cloud.turnedAt ?? 0) >= saved.updatedAt
     /** The last push failed, or the cloud could not be read: the next push or pull tries again. */
     const syncFailed = (saved: Saved | undefined) => saved?.cloud?.state === "failed" || cloudState() === "offline" || cloudState() === "error"
 
     const snapshot = (): Snapshot | undefined => {
       const b = book()
       if (!b) return undefined
-      const { gen, turnedAt } = held(b.key)
-      return { book: b, position: position(), percent: percent(), finished: finished(), gen, turnedAt }
+      return { book: b, position: position(), percent: percent(), finished: finished(), turnedAt: readAt(b.key) }
     }
     const setCloud = (key: string, cloud: Saved["cloud"]) =>
       void setStore((draft) => {
@@ -286,70 +285,64 @@ export default Plugin.define({
       }).catch(() => {})
 
     /**
-     * What the cloud acknowledged per book: the generation and page-turn time
-     * of the reading it holds. Kept in memory too, as store writes land
-     * asynchronously.
+     * What the cloud acknowledged per book: the page-turn time of the reading
+     * it holds. Kept in memory too, as store writes land asynchronously.
      */
-    type Ack = { gen?: number; turnedAt?: number }
-    const acked = new Map<string, Ack>()
-    const ackOf = (key: string): Ack | undefined => {
-      const cloud = store.books[key]?.cloud
-      return acked.get(key) ?? (cloud ? { gen: cloud.gen, turnedAt: cloud.turnedAt } : undefined)
+    const acked = new Map<string, number>()
+    const ackOf = (key: string) => acked.get(key) ?? store.books[key]?.cloud?.turnedAt ?? 0
+    const acknowledge = (key: string, turnedAt: number) => {
+      acked.set(key, turnedAt)
+      setCloud(key, { state: "sent", at: Date.now(), turnedAt })
     }
-    const acknowledge = (key: string, ack: Ack) => {
-      acked.set(key, ack)
-      setCloud(key, { state: "sent", at: Date.now(), ...ack })
+    const syncable = (s: Snapshot | undefined): s is Snapshot => !!s?.book.booxPath && s.turnedAt > 0
+    /** Read on both sides: the panel and sidebar say so until the reader chooses, a toast once per book this session. */
+    const asked = new Set<string>()
+    const noteAsk = (b: { key: string; title: string }, toastIt: boolean) => {
+      setCloud(b.key, { state: "ask", at: Date.now(), turnedAt: ackOf(b.key) })
+      if (toastIt && !asked.has(b.key)) toast(`${b.title}: ${ASK_HINT}`, "warning")
+      asked.add(b.key)
     }
-    /** Whether the cloud already holds this reading (older receipts: by page-turn time). */
-    const inCloud = (s: Snapshot) => {
-      const ack = ackOf(s.book.key)
-      return ack?.gen !== undefined ? s.gen <= ack.gen : (ack?.turnedAt ?? 0) >= s.turnedAt
-    }
-    const syncable = (s: Snapshot | undefined): s is Snapshot => !!s?.book.booxPath && (s.gen > 0 || s.turnedAt > 0)
 
     /** A push of this reading is due: kept in storage until settled, so a lost one is sent again after a restart. */
     const markPending = (s: Snapshot | undefined) => {
-      if (!syncable(s) || inCloud(s)) return
+      if (!syncable(s) || ackOf(s.book.key) >= s.turnedAt) return
       void setStore((draft) => {
         const saved = draft.books[s.book.key]
-        if (saved && (saved.pending ?? -1) < s.gen) saved.pending = s.gen
+        if (saved && (saved.pending ?? 0) < s.turnedAt) saved.pending = s.turnedAt
       }).catch(() => {})
     }
-    /** The reading of generation `gen` (or an older one) needs no push any more: sent, already there, or not to be sent. */
-    const settle = (key: string, gen: number) => {
-      if (settles(store.books[key]?.pending, gen))
+    /** Both sides agreed on the local reading of `agreedAt`: a push due for it (or an older one) is settled. */
+    const settle = (key: string, agreedAt: number | undefined) => {
+      if (settles(store.books[key]?.pending, agreedAt))
         void setStore((draft) => {
           const saved = draft.books[key]
-          if (saved && settles(saved.pending, gen)) delete saved.pending
+          if (saved && settles(saved.pending, agreedAt)) delete saved.pending
         }).catch(() => {})
     }
 
-    /** Offers one snapshot to the server, which pushes it, or says to pull, or that both sides agree. */
-    const pushOnce = async (key: string, s: Snapshot) => {
+    /** Offers one snapshot to the server, which pushes it or says why not; `force`: the reader chose this computer's. */
+    const pushOnce = async (key: string, s: Snapshot, force = false) => {
       if (!syncable(s)) return
-      if (inCloud(s)) return settle(key, s.gen)
+      if (!force && ackOf(key) >= s.turnedAt) return settle(key, s.turnedAt) // This reading is already in the cloud.
       if (!(await settings())?.cloud) return
-      const ack = ackOf(key)
       const result = (await reader
-        .push({
-          path: s.book.path, booxPath: s.book.booxPath, spine: s.position.spine, offset: s.position.offset, percent: s.percent, finished: s.finished,
-          gen: s.gen, turnedAt: s.turnedAt, ...(ack?.turnedAt !== undefined ? { receipt: ack.turnedAt } : {}),
-        })
+        .push({ path: s.book.path, booxPath: s.book.booxPath, spine: s.position.spine, offset: s.position.offset, percent: s.percent, finished: s.finished, turnedAt: s.turnedAt, force })
         .catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PushResult
       if (!result.ok) {
         noteFailure(key, result.state, result.error)
         // The cloud still holds the last acknowledged push.
-        if (result.state !== "off") setCloud(key, { state: "failed", at: Date.now(), ...(ack ?? {}) })
+        if (result.state !== "off") setCloud(key, { state: "failed", at: Date.now(), turnedAt: ackOf(key) })
         return
       }
       setCloudState("ok")
       // Acknowledge the snapshot that was sent, not whatever was read meanwhile.
-      if (result.pushed || result.reason === "same position") acknowledge(key, { gen: s.gen, turnedAt: s.turnedAt })
-      else if (result.reason === "in sync") acked.set(key, { gen: s.gen })
-      // Sent, already there, or to be pulled (when the book is open here; opening it pulls anyway). Failures stay due.
-      settle(key, s.gen)
+      if (result.pushed) acknowledge(key, s.turnedAt)
+      else if (result.action === "none") acked.set(key, s.turnedAt)
+      else if (result.action === "ask") noteAsk(s.book, !force)
+      settle(key, result.agreedAt)
+      // To pull, or a forced push refused (409): read the cloud again, when the book is open here (opening it does anyway).
       const b = book()
-      if (!result.pushed && result.pull && b?.key === key) void syncPull(b, true)
+      if (!result.pushed && (result.action === "pull" || (force && result.action === "ask")) && b?.key === key) void syncPull(b, true)
     }
     const queuePush = pushQueue<Snapshot>(pushOnce)
     /** Pushes per book run one at a time; the latest snapshot offered meanwhile goes next. */
@@ -367,7 +360,7 @@ export default Plugin.define({
         const s = store.books[key]
         const entry = { key, path: s.path, title: s.title, booxPath: s.booxPath, chapters: [], titles: [] }
         const position = { spine: s.spine, offset: s.offset }
-        void queuePush(key, { book: entry, position, percent: s.percent, finished: s.finished === true, gen: s.gen ?? 0, turnedAt: s.updatedAt })
+        void queuePush(key, { book: entry, position, percent: s.percent, finished: s.finished === true, turnedAt: s.updatedAt })
       }
     }
     let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -382,12 +375,14 @@ export default Plugin.define({
     }
 
     /**
-     * Opens at the cloud position when the server says to pull (`reconcile`):
-     * once a minute per book at most, except when the book is opened (`force`).
+     * Reads the book's cloud record and does what the server decides: opens
+     * at the Boox position, or asks when both sides were read. Once a minute
+     * per book at most, except when the book is opened (`force`).
      */
     const lastPull = new Map<string, number>()
     const syncPull = async (b: Book, force = false) => {
-      if (!b.booxPath) return
+      const s = snapshot()
+      if (!b.booxPath || s?.book.key !== b.key) return
       if (!force && Date.now() - (lastPull.get(b.key) ?? 0) < PULL_MIN_INTERVAL_MS) return
       if (!(await settings())?.cloud) {
         setCloudState("off")
@@ -395,12 +390,8 @@ export default Plugin.define({
       }
       lastPull.set(b.key, Date.now())
       const before = position()
-      // The local reading: this window's, or a later one saved by another window.
-      const saved = store.books[b.key]
-      const local = (saved?.gen ?? 0) > held(b.key).gen ? { gen: saved!.gen!, turnedAt: saved!.updatedAt } : held(b.key)
-      const receipt = ackOf(b.key)?.turnedAt
       const result = (await reader
-        .pull({ path: b.path, booxPath: b.booxPath, gen: local.gen, turnedAt: local.turnedAt, ...(receipt !== undefined ? { receipt } : {}) })
+        .pull({ path: b.path, booxPath: b.booxPath, spine: before.spine, offset: before.offset, percent: s.percent, finished: s.finished, turnedAt: s.turnedAt })
         .catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PullResult
       if (!result.ok) {
         noteFailure(b.key, result.state, result.error)
@@ -410,25 +401,43 @@ export default Plugin.define({
       const c = result.cloud
       if (c.percent !== undefined)
         void setStore((draft) => void (draft.books[b.key] && (draft.books[b.key].boox = { percent: c.percent!, lastAccess: c.lastAccess, checkedAt: Date.now() }))).catch(() => {})
-      // The reader moved meanwhile: their move wins (the next push is a conflict they win).
-      if (c.action !== "pull" || book()?.key !== b.key || position() !== before) return
+      settle(b.key, c.agreedAt)
+      // The reader moved meanwhile: decided again at the next push.
+      const still = () => book()?.key === b.key && position() === before
+      if ((c.action !== "pull" && c.action !== "ask") || !still()) return
       const remote = c.spine !== undefined && c.offset !== undefined && c.spine < b.chapters.length ? { spine: c.spine, offset: c.offset } : undefined
       if (!remote) {
         if (c.unmapped || c.spine !== undefined) tellFailure(b.key, UNMAPPED_MESSAGE)
         return
       }
-      const moved = remote.spine !== before.spine || remote.offset !== before.offset
-      if (moved) {
-        bump(b.key, held(b.key).turnedAt) // A position change, not a page turn: the turn time stays.
-        await goTo(remote, false)
-        flush()
+      if (c.action === "ask") {
+        noteAsk(b, false)
+        setDialogOpen(true)
+        const choice = await context.ui.dialog
+          .select<"boox" | "here" | "later">({
+            title: `${b.title}: read on both sides`,
+            options: [
+              { title: `Keep the Boox position (${pct(c.percent ?? 0)}${c.updateTime > 0 ? `, read ${ago(c.updateTime)}` : ""})`, value: "boox" },
+              { title: `Keep this computer's (${pct(s.percent)}, ${ago(s.turnedAt)})`, value: "here" },
+              { title: "Decide later", value: "later" },
+            ],
+          })
+          .finally(() => setDialogOpen(false))
+        if (choice === "here" && still()) return void pushOnce(b.key, s, true)
+        if (choice !== "boox" || !still()) return
       }
-      const gen = held(b.key).gen
-      const agreed = (await reader.agree({ booxPath: b.booxPath, print: c.print, gen }).catch(() => undefined)) as { ok?: boolean } | undefined
-      if (agreed?.ok) acked.set(b.key, { gen }) // The cloud holds this reading (the Boox's, not a push: no "sent").
+      // Applied here now: the newest local reading, which no older window overwrites.
+      const turnedAt = Date.now()
+      reading = { key: b.key, turnedAt }
+      await goTo(remote, false)
+      flush()
+      const agreed = (await reader.agree({ booxPath: b.booxPath, rev: c.rev, print: c.print, turnedAt }).catch(() => undefined)) as { ok?: boolean } | undefined
+      if (agreed?.ok) {
+        acked.set(b.key, turnedAt) // The cloud holds this reading (the Boox's, not a push: no "sent").
+        settle(b.key, turnedAt)
+      }
       setCloud(b.key, undefined)
-      settle(b.key, gen)
-      if (moved) toast(`Opened at the Boox position (${pct(percent())}).`, "success")
+      toast(`Opened at the Boox position (${pct(percent())}).`, "success")
     }
 
     /** Loads a book's index; starts at `start(book)`, else at its saved position, then checks the cloud. */
@@ -464,7 +473,7 @@ export default Plugin.define({
       const saved = store.books[entry.key]
       const first = b.chapters[0] > 0 ? 0 : (nextChapter(b.chapters, 0, 1) ?? 0)
       const pos = start?.(b) ?? (saved && saved.spine < b.chapters.length ? { spine: saved.spine, offset: saved.offset } : { spine: first, offset: 0 })
-      reading = { key: b.key, gen: saved?.gen ?? 0, turnedAt: saved?.updatedAt ?? 0 }
+      reading = { key: b.key, turnedAt: saved?.updatedAt ?? 0 }
       setBook(b)
       setChapter(undefined)
       await goTo(pos, false, savedFinish(saved, pos))
@@ -752,8 +761,6 @@ export default Plugin.define({
         const paragraphs = await ensureChapter(b, previous)
         await goTo({ spine: previous, offset: lastScreen(paragraphs ? wrap(paragraphs) : [], height()) })
       }
-      // While one of our dialogs is open the panel's keys stay off, so typing in its search box is not read as commands.
-      const [dialogOpen, setDialogOpen] = createSignal(false)
       const withDialog = async (show: () => Promise<void>) => {
         if (dialogOpen()) return
         setDialogOpen(true)
@@ -872,6 +879,9 @@ export default Plugin.define({
                   <Show when={!!b().booxPath && !sentToBoox(saved()) && syncFailed(saved())}>
                     <text flexShrink={0} wrapMode="none" fg={theme.text.feedback.warning.base}>Sync failed — will retry</text>
                   </Show>
+                  <Show when={saved()?.cloud?.state === "ask"}>
+                    <text flexShrink={0} wrapMode="none" fg={theme.text.feedback.warning.base}>{ASK_HINT}</text>
+                  </Show>
                   <Show when={notice() || booxStatus()}>
                     <text flexShrink={1} wrapMode="none" fg={theme.text.muted}>{notice() || booxStatus()}</text>
                   </Show>
@@ -928,6 +938,9 @@ export default Plugin.define({
                 </box>
                 <Show when={hint()}>
                   {(n) => <text wrapMode="none" fg={theme.text.feedback.warning.base}>{`Boox: go to ${n()} %`}</text>}
+                </Show>
+                <Show when={s().cloud?.state === "ask"}>
+                  <text wrapMode="none" fg={theme.text.feedback.warning.base}>{fit(ASK_HINT, SIDEBAR_COLUMNS)}</text>
                 </Show>
               </Show>
             </box>

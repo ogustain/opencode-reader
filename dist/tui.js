@@ -16,17 +16,18 @@ import { createElement as _$createElement } from "@opentui/solid";
  * saved per book (debounced) in durable storage. Only the current chapter is
  * held, and only the visible lines are rendered.
  *
- * Sync with the Boox, for books copied from it: opening a book or the panel
- * pulls the cloud position when the Boox moved since both last agreed; closing the
- * panel, switching books or `pushIdleMinutes` without a page turn pushes the
- * local position (the server decides, GET then PUT). A push stays due in
+ * Sync with the Boox, for books copied from it, automatic only when certain:
+ * opening a book or the panel pulls the cloud position when only the Boox
+ * moved since both last agreed, and asks when both did; closing the panel,
+ * switching books or `pushIdleMinutes` without a page turn pushes the local
+ * position when only it moved (the server decides, GET then PUT). A push stays due in
  * storage until settled, and is sent again once at the next start or panel
  * opening. Without the cloud, or when a push fails, the panel and the
  * sidebar show "Boox: go to N %".
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
-import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextGen, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
+import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
 import { batchSummary, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE } from "../src/sync.ts";
 const PANEL = "opencode-reader";
@@ -34,6 +35,7 @@ const SIDEBAR_COLUMNS = 37;
 const SAVE_DELAY_MS = 800;
 const BOOX_MIN_INTERVAL_MS = 60_000;
 const PULL_MIN_INTERVAL_MS = 60_000;
+const ASK_HINT = "Read on both sides — open the book to choose";
 
 /** The fields of the host's `session.panel` input (PanelInput) this panel uses. */
 
@@ -91,6 +93,10 @@ const fit = (text, width) => {
   const chars = Array.from(text);
   return width <= 0 ? "" : chars.length <= width ? text : chars.slice(0, width - 1).join("") + "…";
 };
+const ago = ms => {
+  const minutes = Math.max(0, Math.round((Date.now() - ms) / 60_000));
+  return minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min ago` : minutes < 2880 ? `${Math.round(minutes / 60)} h ago` : `${Math.round(minutes / 1440)} d ago`;
+};
 const day = ms => {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -126,6 +132,9 @@ export default Plugin.define({
     const [chapter, setChapter] = createSignal();
     const [notice, setNotice] = createSignal("");
     const [booxStatus, setBooxStatus] = createSignal("");
+
+    // While one of our dialogs is open the panel's keys stay off, so typing in its search box is not read as commands.
+    const [dialogOpen, setDialogOpen] = createSignal(false);
     const toast = (message, variant = "info") => context.ui.toast.show({
       title: "Reader",
       message,
@@ -146,27 +155,14 @@ export default Plugin.define({
       return b ? progressOf(b.chapters, position(), finished()) : 0;
     };
 
-    // The reading held here: its book, the generation of the current position
-    // (bumped past every window's by a turn or an applied Boox position) and
-    // its page-turn time (a turn sets it; 0 before any). Opening keeps the
-    // saved ones. They go with the position, in saves and pushes.
+    // The reading held here: its book and the page-turn time of the current
+    // position (a turn or an applied Boox position sets it; opening keeps the
+    // saved one; 0 before any). It goes with the position, in saves and pushes.
     let reading = {
       key: "",
-      gen: 0,
       turnedAt: 0
     };
-    const held = key => reading.key === key ? reading : {
-      key,
-      gen: 0,
-      turnedAt: 0
-    };
-    const bump = (key, turnedAt) => {
-      reading = {
-        key,
-        gen: nextGen(held(key).gen, store.books[key]?.gen),
-        turnedAt
-      };
-    };
+    const readAt = key => reading.key === key ? reading.turnedAt : 0;
 
     // Debounced save of the current position; flushed on close and unload.
     let saveTimer;
@@ -179,15 +175,12 @@ export default Plugin.define({
       const value = percent();
       const done = finished();
       const now = Date.now();
-      const {
-        gen,
-        turnedAt
-      } = held(b.key);
+      const turnedAt = readAt(b.key);
       void setStore(draft => {
         const previous = draft.books[b.key];
         draft.current = b.key;
-        // Another window moved later: keep its position, generation and time.
-        if (keepsStored(previous, gen)) {
+        // Another window moved later: keep its position and time.
+        if (keepsStored(previous, turnedAt)) {
           if (opened) previous.openedAt = now;
           return;
         }
@@ -202,7 +195,6 @@ export default Plugin.define({
           offset: pos.offset,
           percent: value,
           finished: done,
-          gen,
           ...savedTimes(previous, {
             turnedAt,
             opened,
@@ -253,7 +245,10 @@ export default Plugin.define({
       const b = book();
       if (!b) return;
       if (user) {
-        bump(b.key, Date.now());
+        reading = {
+          key: b.key,
+          turnedAt: Date.now()
+        };
         scheduleIdlePush();
       }
       setFinishedAt(finish ? {
@@ -291,23 +286,18 @@ export default Plugin.define({
     };
     /** The "go to N %" hint is for when the cloud cannot carry the position. */
     const cloudCarries = saved => cloudState() === "ok" && saved?.cloud?.state !== "failed";
-    const sentToBoox = saved => saved?.cloud?.state === "sent" && (saved.cloud.gen !== undefined ? saved.cloud.gen >= (saved.gen ?? 0) : (saved.cloud.turnedAt ?? 0) >= saved.updatedAt);
+    const sentToBoox = saved => saved?.cloud?.state === "sent" && (saved.cloud.turnedAt ?? 0) >= saved.updatedAt;
     /** The last push failed, or the cloud could not be read: the next push or pull tries again. */
     const syncFailed = saved => saved?.cloud?.state === "failed" || cloudState() === "offline" || cloudState() === "error";
     const snapshot = () => {
       const b = book();
       if (!b) return undefined;
-      const {
-        gen,
-        turnedAt
-      } = held(b.key);
       return {
         book: b,
         position: position(),
         percent: percent(),
         finished: finished(),
-        gen,
-        turnedAt
+        turnedAt: readAt(b.key)
       };
     };
     const setCloud = (key, cloud) => void setStore(draft => {
@@ -317,56 +307,53 @@ export default Plugin.define({
     }).catch(() => {});
 
     /**
-     * What the cloud acknowledged per book: the generation and page-turn time
-     * of the reading it holds. Kept in memory too, as store writes land
-     * asynchronously.
+     * What the cloud acknowledged per book: the page-turn time of the reading
+     * it holds. Kept in memory too, as store writes land asynchronously.
      */
-
     const acked = new Map();
-    const ackOf = key => {
-      const cloud = store.books[key]?.cloud;
-      return acked.get(key) ?? (cloud ? {
-        gen: cloud.gen,
-        turnedAt: cloud.turnedAt
-      } : undefined);
-    };
-    const acknowledge = (key, ack) => {
-      acked.set(key, ack);
+    const ackOf = key => acked.get(key) ?? store.books[key]?.cloud?.turnedAt ?? 0;
+    const acknowledge = (key, turnedAt) => {
+      acked.set(key, turnedAt);
       setCloud(key, {
         state: "sent",
         at: Date.now(),
-        ...ack
+        turnedAt
       });
     };
-    /** Whether the cloud already holds this reading (older receipts: by page-turn time). */
-    const inCloud = s => {
-      const ack = ackOf(s.book.key);
-      return ack?.gen !== undefined ? s.gen <= ack.gen : (ack?.turnedAt ?? 0) >= s.turnedAt;
+    const syncable = s => !!s?.book.booxPath && s.turnedAt > 0;
+    /** Read on both sides: the panel and sidebar say so until the reader chooses, a toast once per book this session. */
+    const asked = new Set();
+    const noteAsk = (b, toastIt) => {
+      setCloud(b.key, {
+        state: "ask",
+        at: Date.now(),
+        turnedAt: ackOf(b.key)
+      });
+      if (toastIt && !asked.has(b.key)) toast(`${b.title}: ${ASK_HINT}`, "warning");
+      asked.add(b.key);
     };
-    const syncable = s => !!s?.book.booxPath && (s.gen > 0 || s.turnedAt > 0);
 
     /** A push of this reading is due: kept in storage until settled, so a lost one is sent again after a restart. */
     const markPending = s => {
-      if (!syncable(s) || inCloud(s)) return;
+      if (!syncable(s) || ackOf(s.book.key) >= s.turnedAt) return;
       void setStore(draft => {
         const saved = draft.books[s.book.key];
-        if (saved && (saved.pending ?? -1) < s.gen) saved.pending = s.gen;
+        if (saved && (saved.pending ?? 0) < s.turnedAt) saved.pending = s.turnedAt;
       }).catch(() => {});
     };
-    /** The reading of generation `gen` (or an older one) needs no push any more: sent, already there, or not to be sent. */
-    const settle = (key, gen) => {
-      if (settles(store.books[key]?.pending, gen)) void setStore(draft => {
+    /** Both sides agreed on the local reading of `agreedAt`: a push due for it (or an older one) is settled. */
+    const settle = (key, agreedAt) => {
+      if (settles(store.books[key]?.pending, agreedAt)) void setStore(draft => {
         const saved = draft.books[key];
-        if (saved && settles(saved.pending, gen)) delete saved.pending;
+        if (saved && settles(saved.pending, agreedAt)) delete saved.pending;
       }).catch(() => {});
     };
 
-    /** Offers one snapshot to the server, which pushes it, or says to pull, or that both sides agree. */
-    const pushOnce = async (key, s) => {
+    /** Offers one snapshot to the server, which pushes it or says why not; `force`: the reader chose this computer's. */
+    const pushOnce = async (key, s, force = false) => {
       if (!syncable(s)) return;
-      if (inCloud(s)) return settle(key, s.gen);
+      if (!force && ackOf(key) >= s.turnedAt) return settle(key, s.turnedAt); // This reading is already in the cloud.
       if (!(await settings())?.cloud) return;
-      const ack = ackOf(key);
       const result = await reader.push({
         path: s.book.path,
         booxPath: s.book.booxPath,
@@ -374,11 +361,8 @@ export default Plugin.define({
         offset: s.position.offset,
         percent: s.percent,
         finished: s.finished,
-        gen: s.gen,
         turnedAt: s.turnedAt,
-        ...(ack?.turnedAt !== undefined ? {
-          receipt: ack.turnedAt
-        } : {})
+        force
       }).catch(e => ({
         ok: false,
         state: "error",
@@ -390,22 +374,17 @@ export default Plugin.define({
         if (result.state !== "off") setCloud(key, {
           state: "failed",
           at: Date.now(),
-          ...(ack ?? {})
+          turnedAt: ackOf(key)
         });
         return;
       }
       setCloudState("ok");
       // Acknowledge the snapshot that was sent, not whatever was read meanwhile.
-      if (result.pushed || result.reason === "same position") acknowledge(key, {
-        gen: s.gen,
-        turnedAt: s.turnedAt
-      });else if (result.reason === "in sync") acked.set(key, {
-        gen: s.gen
-      });
-      // Sent, already there, or to be pulled (when the book is open here; opening it pulls anyway). Failures stay due.
-      settle(key, s.gen);
+      if (result.pushed) acknowledge(key, s.turnedAt);else if (result.action === "none") acked.set(key, s.turnedAt);else if (result.action === "ask") noteAsk(s.book, !force);
+      settle(key, result.agreedAt);
+      // To pull, or a forced push refused (409): read the cloud again, when the book is open here (opening it does anyway).
       const b = book();
-      if (!result.pushed && result.pull && b?.key === key) void syncPull(b, true);
+      if (!result.pushed && (result.action === "pull" || force && result.action === "ask") && b?.key === key) void syncPull(b, true);
     };
     const queuePush = pushQueue(pushOnce);
     /** Pushes per book run one at a time; the latest snapshot offered meanwhile goes next. */
@@ -438,7 +417,6 @@ export default Plugin.define({
           position,
           percent: s.percent,
           finished: s.finished === true,
-          gen: s.gen ?? 0,
           turnedAt: s.updatedAt
         });
       }
@@ -455,12 +433,14 @@ export default Plugin.define({
     };
 
     /**
-     * Opens at the cloud position when the server says to pull (`reconcile`):
-     * once a minute per book at most, except when the book is opened (`force`).
+     * Reads the book's cloud record and does what the server decides: opens
+     * at the Boox position, or asks when both sides were read. Once a minute
+     * per book at most, except when the book is opened (`force`).
      */
     const lastPull = new Map();
     const syncPull = async (b, force = false) => {
-      if (!b.booxPath) return;
+      const s = snapshot();
+      if (!b.booxPath || s?.book.key !== b.key) return;
       if (!force && Date.now() - (lastPull.get(b.key) ?? 0) < PULL_MIN_INTERVAL_MS) return;
       if (!(await settings())?.cloud) {
         setCloudState("off");
@@ -468,21 +448,14 @@ export default Plugin.define({
       }
       lastPull.set(b.key, Date.now());
       const before = position();
-      // The local reading: this window's, or a later one saved by another window.
-      const saved = store.books[b.key];
-      const local = (saved?.gen ?? 0) > held(b.key).gen ? {
-        gen: saved.gen,
-        turnedAt: saved.updatedAt
-      } : held(b.key);
-      const receipt = ackOf(b.key)?.turnedAt;
       const result = await reader.pull({
         path: b.path,
         booxPath: b.booxPath,
-        gen: local.gen,
-        turnedAt: local.turnedAt,
-        ...(receipt !== undefined ? {
-          receipt
-        } : {})
+        spine: before.spine,
+        offset: before.offset,
+        percent: s.percent,
+        finished: s.finished,
+        turnedAt: s.turnedAt
       }).catch(e => ({
         ok: false,
         state: "error",
@@ -499,8 +472,10 @@ export default Plugin.define({
         lastAccess: c.lastAccess,
         checkedAt: Date.now()
       }))).catch(() => {});
-      // The reader moved meanwhile: their move wins (the next push is a conflict they win).
-      if (c.action !== "pull" || book()?.key !== b.key || position() !== before) return;
+      settle(b.key, c.agreedAt);
+      // The reader moved meanwhile: decided again at the next push.
+      const still = () => book()?.key === b.key && position() === before;
+      if (c.action !== "pull" && c.action !== "ask" || !still()) return;
       const remote = c.spine !== undefined && c.offset !== undefined && c.spine < b.chapters.length ? {
         spine: c.spine,
         offset: c.offset
@@ -509,24 +484,45 @@ export default Plugin.define({
         if (c.unmapped || c.spine !== undefined) tellFailure(b.key, UNMAPPED_MESSAGE);
         return;
       }
-      const moved = remote.spine !== before.spine || remote.offset !== before.offset;
-      if (moved) {
-        bump(b.key, held(b.key).turnedAt); // A position change, not a page turn: the turn time stays.
-        await goTo(remote, false);
-        flush();
+      if (c.action === "ask") {
+        noteAsk(b, false);
+        setDialogOpen(true);
+        const choice = await context.ui.dialog.select({
+          title: `${b.title}: read on both sides`,
+          options: [{
+            title: `Keep the Boox position (${pct(c.percent ?? 0)}${c.updateTime > 0 ? `, read ${ago(c.updateTime)}` : ""})`,
+            value: "boox"
+          }, {
+            title: `Keep this computer's (${pct(s.percent)}, ${ago(s.turnedAt)})`,
+            value: "here"
+          }, {
+            title: "Decide later",
+            value: "later"
+          }]
+        }).finally(() => setDialogOpen(false));
+        if (choice === "here" && still()) return void pushOnce(b.key, s, true);
+        if (choice !== "boox" || !still()) return;
       }
-      const gen = held(b.key).gen;
+      // Applied here now: the newest local reading, which no older window overwrites.
+      const turnedAt = Date.now();
+      reading = {
+        key: b.key,
+        turnedAt
+      };
+      await goTo(remote, false);
+      flush();
       const agreed = await reader.agree({
         booxPath: b.booxPath,
+        rev: c.rev,
         print: c.print,
-        gen
+        turnedAt
       }).catch(() => undefined);
-      if (agreed?.ok) acked.set(b.key, {
-        gen
-      }); // The cloud holds this reading (the Boox's, not a push: no "sent").
+      if (agreed?.ok) {
+        acked.set(b.key, turnedAt); // The cloud holds this reading (the Boox's, not a push: no "sent").
+        settle(b.key, turnedAt);
+      }
       setCloud(b.key, undefined);
-      settle(b.key, gen);
-      if (moved) toast(`Opened at the Boox position (${pct(percent())}).`, "success");
+      toast(`Opened at the Boox position (${pct(percent())}).`, "success");
     };
 
     /** Loads a book's index; starts at `start(book)`, else at its saved position, then checks the cloud. */
@@ -577,7 +573,6 @@ export default Plugin.define({
       });
       reading = {
         key: b.key,
-        gen: saved?.gen ?? 0,
         turnedAt: saved?.updatedAt ?? 0
       };
       setBook(b);
@@ -924,8 +919,6 @@ export default Plugin.define({
           offset: lastScreen(paragraphs ? wrap(paragraphs) : [], height())
         });
       };
-      // While one of our dialogs is open the panel's keys stay off, so typing in its search box is not read as commands.
-      const [dialogOpen, setDialogOpen] = createSignal(false);
       const withDialog = async show => {
         if (dialogOpen()) return;
         setDialogOpen(true);
@@ -1089,10 +1082,10 @@ export default Plugin.define({
               },
               get fallback() {
                 return (() => {
-                  var _el$15 = _$createElement("text");
-                  _$insertNode(_el$15, _$createTextNode(`Loading…`));
-                  _$effect(_$p => _$setProp(_el$15, "fg", theme.text.muted, _$p));
-                  return _el$15;
+                  var _el$17 = _$createElement("text");
+                  _$insertNode(_el$17, _$createTextNode(`Loading…`));
+                  _$effect(_$p => _$setProp(_el$17, "fg", theme.text.muted, _$p));
+                  return _el$17;
                 })();
               },
               get children() {
@@ -1101,19 +1094,19 @@ export default Plugin.define({
                     return screen().lines;
                   },
                   children: line => (() => {
-                    var _el$17 = _$createElement("text");
-                    _$setProp(_el$17, "height", 1);
-                    _$setProp(_el$17, "wrapMode", "none");
-                    _$insert(_el$17, (() => {
+                    var _el$19 = _$createElement("text");
+                    _$setProp(_el$19, "height", 1);
+                    _$setProp(_el$19, "wrapMode", "none");
+                    _$insert(_el$19, (() => {
                       var _c$ = _$memo(() => !!line().heading);
                       return () => _c$() ? (() => {
-                        var _el$18 = _$createElement("b");
-                        _$insert(_el$18, () => line().text || " ");
-                        return _el$18;
+                        var _el$20 = _$createElement("b");
+                        _$insert(_el$20, () => line().text || " ");
+                        return _el$20;
                       })() : line().text || " ";
                     })());
-                    _$effect(_$p => _$setProp(_el$17, "fg", theme.text.base, _$p));
-                    return _el$17;
+                    _$effect(_$p => _$setProp(_el$19, "fg", theme.text.base, _$p));
+                    return _el$19;
                   })()
                 });
               }
@@ -1135,12 +1128,12 @@ export default Plugin.define({
                 return hint();
               },
               children: n => (() => {
-                var _el$19 = _$createElement("text");
-                _$setProp(_el$19, "flexShrink", 0);
-                _$setProp(_el$19, "wrapMode", "none");
-                _$insert(_el$19, () => `Boox: go to ${n()} %`);
-                _$effect(_$p => _$setProp(_el$19, "fg", theme.text.feedback.warning.base, _$p));
-                return _el$19;
+                var _el$21 = _$createElement("text");
+                _$setProp(_el$21, "flexShrink", 0);
+                _$setProp(_el$21, "wrapMode", "none");
+                _$insert(_el$21, () => `Boox: go to ${n()} %`);
+                _$effect(_$p => _$setProp(_el$21, "fg", theme.text.feedback.warning.base, _$p));
+                return _el$21;
               })()
             }), null);
             _$insert(_el$9, _$createComponent(Show, {
@@ -1171,26 +1164,39 @@ export default Plugin.define({
             }), null);
             _$insert(_el$9, _$createComponent(Show, {
               get when() {
-                return notice() || booxStatus();
+                return saved()?.cloud?.state === "ask";
               },
               get children() {
                 var _el$13 = _$createElement("text");
-                _$setProp(_el$13, "flexShrink", 1);
+                _$insertNode(_el$13, _$createTextNode(`Read on both sides — open the book to choose`));
+                _$setProp(_el$13, "flexShrink", 0);
                 _$setProp(_el$13, "wrapMode", "none");
-                _$insert(_el$13, () => notice() || booxStatus());
-                _$effect(_$p => _$setProp(_el$13, "fg", theme.text.muted, _$p));
+                _$effect(_$p => _$setProp(_el$13, "fg", theme.text.feedback.warning.base, _$p));
                 return _el$13;
+              }
+            }), null);
+            _$insert(_el$9, _$createComponent(Show, {
+              get when() {
+                return notice() || booxStatus();
+              },
+              get children() {
+                var _el$15 = _$createElement("text");
+                _$setProp(_el$15, "flexShrink", 1);
+                _$setProp(_el$15, "wrapMode", "none");
+                _$insert(_el$15, () => notice() || booxStatus());
+                _$effect(_$p => _$setProp(_el$15, "fg", theme.text.muted, _$p));
+                return _el$15;
               }
             }), null);
             _$effect(_$p => _$setProp(_el$0, "fg", theme.text.muted, _$p));
             return _el$9;
           })(), (() => {
-            var _el$14 = _$createElement("text");
-            _$setProp(_el$14, "height", 1);
-            _$setProp(_el$14, "wrapMode", "none");
-            _$insert(_el$14, () => fit(props.panel.focused ? "←/→ page · t contents · s settings · f fullscreen · q close" : "click to read", width()));
-            _$effect(_$p => _$setProp(_el$14, "fg", props.panel.focused ? theme.text.base : theme.text.muted, _$p));
-            return _el$14;
+            var _el$16 = _$createElement("text");
+            _$setProp(_el$16, "height", 1);
+            _$setProp(_el$16, "wrapMode", "none");
+            _$insert(_el$16, () => fit(props.panel.focused ? "←/→ page · t contents · s settings · f fullscreen · q close" : "click to read", width()));
+            _$effect(_$p => _$setProp(_el$16, "fg", props.panel.focused ? theme.text.base : theme.text.muted, _$p));
+            return _el$16;
           })()]
         }));
         return _el$;
@@ -1228,78 +1234,89 @@ export default Plugin.define({
           return shown();
         },
         children: s => (() => {
-          var _el$20 = _$createElement("box"),
-            _el$21 = _$createElement("box"),
-            _el$22 = _$createElement("text"),
-            _el$23 = _$createElement("text"),
-            _el$24 = _$createElement("b"),
-            _el$26 = _$createElement("box");
-          _$insertNode(_el$20, _el$21);
-          _$setProp(_el$20, "flexDirection", "column");
-          _$insertNode(_el$21, _el$22);
-          _$insertNode(_el$21, _el$23);
-          _$insertNode(_el$21, _el$26);
-          _$setProp(_el$21, "flexDirection", "row");
-          _$setProp(_el$21, "gap", 1);
-          _$setProp(_el$21, "onMouseUp", () => void setView(draft => void (draft.open = !draft.open)).catch(() => {}));
-          _$setProp(_el$22, "flexShrink", 0);
-          _$insert(_el$22, () => view.open ? "▼" : "▶");
+          var _el$22 = _$createElement("box"),
+            _el$23 = _$createElement("box"),
+            _el$24 = _$createElement("text"),
+            _el$25 = _$createElement("text"),
+            _el$26 = _$createElement("b"),
+            _el$28 = _$createElement("box");
+          _$insertNode(_el$22, _el$23);
+          _$setProp(_el$22, "flexDirection", "column");
           _$insertNode(_el$23, _el$24);
-          _$setProp(_el$23, "flexShrink", 0);
-          _$insertNode(_el$24, _$createTextNode(`Reading`));
-          _$setProp(_el$26, "flexGrow", 1);
-          _$insert(_el$21, _$createComponent(Show, {
+          _$insertNode(_el$23, _el$25);
+          _$insertNode(_el$23, _el$28);
+          _$setProp(_el$23, "flexDirection", "row");
+          _$setProp(_el$23, "gap", 1);
+          _$setProp(_el$23, "onMouseUp", () => void setView(draft => void (draft.open = !draft.open)).catch(() => {}));
+          _$setProp(_el$24, "flexShrink", 0);
+          _$insert(_el$24, () => view.open ? "▼" : "▶");
+          _$insertNode(_el$25, _el$26);
+          _$setProp(_el$25, "flexShrink", 0);
+          _$insertNode(_el$26, _$createTextNode(`Reading`));
+          _$setProp(_el$28, "flexGrow", 1);
+          _$insert(_el$23, _$createComponent(Show, {
             get when() {
               return !view.open;
             },
             get children() {
-              var _el$27 = _$createElement("text");
-              _$setProp(_el$27, "flexShrink", 0);
-              _$setProp(_el$27, "wrapMode", "none");
-              _$insert(_el$27, () => pct(value()));
-              _$effect(_$p => _$setProp(_el$27, "fg", hint() ? theme.text.feedback.warning.base : theme.text.muted, _$p));
-              return _el$27;
+              var _el$29 = _$createElement("text");
+              _$setProp(_el$29, "flexShrink", 0);
+              _$setProp(_el$29, "wrapMode", "none");
+              _$insert(_el$29, () => pct(value()));
+              _$effect(_$p => _$setProp(_el$29, "fg", hint() ? theme.text.feedback.warning.base : theme.text.muted, _$p));
+              return _el$29;
             }
           }), null);
-          _$insert(_el$20, _$createComponent(Show, {
+          _$insert(_el$22, _$createComponent(Show, {
             get when() {
               return view.open;
             },
             get children() {
               return [(() => {
-                var _el$28 = _$createElement("box"),
-                  _el$29 = _$createElement("text");
-                _$insertNode(_el$28, _el$29);
-                _$setProp(_el$28, "onMouseUp", () => void reopen());
-                _$setProp(_el$29, "wrapMode", "none");
-                _$insert(_el$29, () => `📖 ${fit(s().title, SIDEBAR_COLUMNS - 3 - 3 - pct(value()).length)} — ${pct(value())}`);
-                _$effect(_$p => _$setProp(_el$29, "fg", theme.text.base, _$p));
-                return _el$28;
+                var _el$30 = _$createElement("box"),
+                  _el$31 = _$createElement("text");
+                _$insertNode(_el$30, _el$31);
+                _$setProp(_el$30, "onMouseUp", () => void reopen());
+                _$setProp(_el$31, "wrapMode", "none");
+                _$insert(_el$31, () => `📖 ${fit(s().title, SIDEBAR_COLUMNS - 3 - 3 - pct(value()).length)} — ${pct(value())}`);
+                _$effect(_$p => _$setProp(_el$31, "fg", theme.text.base, _$p));
+                return _el$30;
               })(), _$createComponent(Show, {
                 get when() {
                   return hint();
                 },
                 children: n => (() => {
-                  var _el$30 = _$createElement("text");
-                  _$setProp(_el$30, "wrapMode", "none");
-                  _$insert(_el$30, () => `Boox: go to ${n()} %`);
-                  _$effect(_$p => _$setProp(_el$30, "fg", theme.text.feedback.warning.base, _$p));
-                  return _el$30;
+                  var _el$33 = _$createElement("text");
+                  _$setProp(_el$33, "wrapMode", "none");
+                  _$insert(_el$33, () => `Boox: go to ${n()} %`);
+                  _$effect(_$p => _$setProp(_el$33, "fg", theme.text.feedback.warning.base, _$p));
+                  return _el$33;
                 })()
+              }), _$createComponent(Show, {
+                get when() {
+                  return s().cloud?.state === "ask";
+                },
+                get children() {
+                  var _el$32 = _$createElement("text");
+                  _$setProp(_el$32, "wrapMode", "none");
+                  _$insert(_el$32, () => fit(ASK_HINT, SIDEBAR_COLUMNS));
+                  _$effect(_$p => _$setProp(_el$32, "fg", theme.text.feedback.warning.base, _$p));
+                  return _el$32;
+                }
               })];
             }
           }), null);
           _$effect(_p$ => {
             var _v$ = theme.text.base,
               _v$2 = theme.text.base;
-            _v$ !== _p$.e && (_p$.e = _$setProp(_el$22, "fg", _v$, _p$.e));
-            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$23, "fg", _v$2, _p$.t));
+            _v$ !== _p$.e && (_p$.e = _$setProp(_el$24, "fg", _v$, _p$.e));
+            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$25, "fg", _v$2, _p$.t));
             return _p$;
           }, {
             e: undefined,
             t: undefined
           });
-          return _el$20;
+          return _el$22;
         })()
       });
     }

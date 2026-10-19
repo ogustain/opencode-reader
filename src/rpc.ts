@@ -47,19 +47,24 @@ export type CloudPosition = {
   exact?: boolean
   /** The Boox's page-based percentage. */
   percent?: number
+  /** The Boox's last save (its own clock: for display only) and opening. */
+  updateTime: number
   lastAccess: number
   /** What to do with the local reading (`reconcile`). */
   action: Action
-  /** The cloud reading (`readingPrint`), sent back with `agree` once applied. */
+  /** The cloud doc's revision and reading (`readingPrint`), sent back with `agree` once applied. */
+  rev: string
   print: string
+  /** Local page-turn time of the last agreement: settles a due push up to it. */
+  agreedAt?: number
   /** The cloud has a reading position, but in no chapter of this copy. */
   unmapped?: true
 }
 export type PullResult = { ok: true; cloud: CloudPosition } | { ok: false; state: OnyxState; error: string }
 export type PushResult =
-  | { ok: true; pushed: true; at: number }
-  /** `pull`: the cloud's reading is the one to take (`reconcile`). */
-  | { ok: true; pushed: false; reason: string; pull?: true }
+  | { ok: true; pushed: true; at: number; agreedAt: number }
+  /** Not sent: `action` says why (`reconcile`; "ask" after a 409 on a forced push). */
+  | { ok: true; pushed: false; action: Action; agreedAt?: number }
   | { ok: false; state: OnyxState; error: string }
 
 const object = { type: "object" } as const
@@ -81,11 +86,11 @@ export const ReaderRpc = Rpc.define({
     settings: { input: object, output: object },
     /** { refresh?: boolean } → CloudListing (the cloud is asked at most once a minute) */
     cloud: { input: object, output: object },
-    /** { path, booxPath, gen, turnedAt, receipt? } → PullResult (the local reading's generation, page-turn time, last push receipt) */
+    /** { path, booxPath, spine, offset, percent, finished, turnedAt } → PullResult (the local reading, `turnedAt`: its page-turn time) */
     pull: { input: object, output: object },
-    /** { booxPath, print, gen } → { ok } (the cloud reading `print` was applied locally as generation `gen`) */
+    /** { booxPath, rev, print, turnedAt } → { ok } (the cloud reading `print` at `rev` was applied locally at `turnedAt`) */
     agree: { input: object, output: object },
-    /** { path, booxPath, spine, offset, percent, finished, gen, turnedAt, receipt? } → PushResult (GET, then PUT of the book doc) */
+    /** { path, booxPath, spine, offset, percent, finished, turnedAt, force? } → PushResult (GET, then PUT of the book doc) */
     push: { input: object, output: object },
   },
   events: {},

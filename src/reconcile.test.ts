@@ -1,29 +1,32 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { pullDoc, pushDoc, readingPrint, reconcile, withBase, withWrite, type CloudMark, type Doc, type DocIo, type LocalReading } from "./sync.ts"
+import { pullDoc, pushDoc, readingPrint, reconcile, validMark, type Doc, type DocIo, type LocalReading } from "./sync.ts"
 
-// A book doc as NeoReader leaves it: a v3 position (node `node` of chapter 1), progress, its save time and device.
-const point = (node: number) => JSON.stringify({ chapterIndex: 1, nodePosition: node, textOffset: 0, xpath: [1, node] })
-const bookDoc = (node: number, progress: string, updateTime: number, device = "Go7", rev = "1-a", lastAccess = 0): Doc => ({
+// A book doc as NeoReader leaves it: a v3 position (node `node` of chapter 1), progress, and its save time (device clock) when given.
+const point = (node: number) => JSON.stringify({ chapterIndex: 1, nodePosition: node, textOffset: 0, chapterStartPosition: 1000, chapterEndPosition: 9000, xpath: [1, node] })
+const bookDoc = (node: number, progress: string, rev: string, updateTime?: number, lastAccess = 0): Doc => ({
   _id: "u1#b", _rev: rev, modeType: 4, uniqueId: "b", status: 0, type: "epub", progress, lastAccess,
-  extraAttributes: JSON.stringify({ backend: { current_page_position_v3: point(node), user_doc_data_update_time: updateTime, device_model: device, total_page: 100 } }),
+  extraAttributes: JSON.stringify({
+    backend: { current_page_position_v3: point(node), ...(updateTime !== undefined ? { user_doc_data_update_time: updateTime } : {}), device_model: "Go7", total_page: 100 },
+  }),
 })
 
 const CONFLICT = new Error("409")
 
-/** A fake Onyx cloud holding one book doc, and the server's sync record for it (`mark`, undefined: `onyx-sync.json` missing). */
+/** A fake Onyx cloud holding one book doc, and the server's raw sync record for it (`raw`, undefined: `onyx-sync.json` missing). */
 function fakeCloud(doc: Doc) {
   let revs = 1
   const cloud = {
     doc,
-    mark: undefined as CloudMark | undefined,
+    raw: undefined as unknown,
     puts: 0,
     /** The next PUT is accepted but its answer is lost. */
     lose: false,
-    now: 10_000,
-    /** The Boox saves a reading (its own clock: `updateTime`). */
-    booxSaves(node: number, progress: string, updateTime: number) {
-      cloud.doc = bookDoc(node, progress, updateTime, "Go7", `${++revs}-b`)
+    /** The next PUT is refused: the doc changed meanwhile. */
+    conflict: false,
+    /** The Boox saves a reading. */
+    booxSaves(node: number, progress = "50/100", updateTime?: number) {
+      cloud.doc = bookDoc(node, progress, `${++revs}-b`, updateTime)
     },
     /** The Boox opens the book without reading: only `lastAccess` and `_rev` change. */
     booxOpens(lastAccess: number) {
@@ -33,180 +36,198 @@ function fakeCloud(doc: Doc) {
   const io: DocIo = {
     getDoc: async () => structuredClone(cloud.doc),
     putDoc: async (next) => {
-      if (next._rev !== cloud.doc._rev) throw CONFLICT
+      if (cloud.conflict || next._rev !== cloud.doc._rev) {
+        cloud.conflict = false
+        throw CONFLICT
+      }
       cloud.doc = { ...next, _rev: `${++revs}-p` }
       cloud.puts++
       if (cloud.lose) {
         cloud.lose = false
         throw new Error("socket hang up")
       }
+      return String(cloud.doc._rev)
     },
     isConflict: (error) => error === CONFLICT,
-    mark: () => cloud.mark,
-    setMark: (change) => void (cloud.mark = change(cloud.mark)),
+    mark: () => validMark(cloud.raw),
+    setMark: (mark) => void (cloud.raw = mark),
     backup: () => {},
     toLocal: (p) => ({ spine: p.chapterIndex, offset: p.nodePosition, exact: true }),
     toNeo: (l) => ({ chapterIndex: l.spine, nodePosition: l.offset, textOffset: 0, xpath: [1, l.offset] }),
-    now: () => cloud.now,
+    now: () => 10_000,
   }
-  /** What the TUI does after applying a pulled position (the `agree` RPC). */
-  const agree = (print: string, gen: number) => io.setMark((m) => withBase(m, { cloud: print, local: gen }))
-  const push = (local: LocalReading, node: number, percent = 30, finished = false) => pushDoc(io, { ...local, position: { spine: 1, offset: node }, percent, finished })
-  return { cloud, io, agree, push, pull: (local: LocalReading) => pullDoc(io, local) }
+  const local = (node: number, turnedAt: number, percent = 30, finished = false): LocalReading => ({ position: { spine: 1, offset: node }, percent, finished, turnedAt })
+  return {
+    cloud,
+    io,
+    local,
+    pull: (l: LocalReading) => pullDoc(io, l),
+    push: (l: LocalReading, force = false) => pushDoc(io, l, force),
+    /** What the TUI does after applying a pulled position at `turnedAt` (the `agree` RPC). */
+    agree: (pulled: { rev: string; print: string }, turnedAt: number) => io.setMark({ base: { rev: pulled.rev, print: pulled.print, localAt: turnedAt } }),
+  }
 }
 
-/** The cloud opened here once, from a fresh install: pulled, applied as generation 1. */
+/** Opened here for the first time (nothing read yet): the Boox position is pulled and applied at 1000. */
 async function adopted(doc: Doc) {
   const f = fakeCloud(doc)
-  const first = await f.pull({ gen: 0, turnedAt: 0 })
+  const first = await f.pull(f.local(0, 0))
   assert.equal(first.action, "pull")
-  f.agree(first.print, 1)
+  f.agree(first, 1_000)
   return f
 }
 
-test("reconcile: one side changed wins whatever the clocks; both is a conflict the latest wins", () => {
-  const base = { cloud: "A", local: 3 }
-  const run = (cloud: string, gen: number, turnedAt: number, cloudTime: number, extra: Partial<Parameters<typeof reconcile>[0]> = {}) =>
-    reconcile({ cloud, base, gen, turnedAt, cloudTime, ...extra }).action
-  const rows: Array<[string, ReturnType<typeof run>, ReturnType<typeof run>]> = [
-    ["neither changed", run("A", 3, 100, 900), "none"],
-    ["only local, Boox clock ahead", run("A", 4, 100, 900), "push"],
-    ["only cloud, Boox clock behind", run("B", 3, 900, 100), "pull"],
-    ["both, local later", run("B", 4, 900, 100), "push"],
-    ["both, Boox later", run("B", 4, 100, 900), "pull"],
-    ["both, same time: the Boox", run("B", 4, 500, 500), "pull"],
-    ["an older local generation", run("A", 2, 900, 100), "none"],
+test("reconcile: automatic only when one side changed, asked when both or when nothing is known", () => {
+  const base = { rev: "5-a", print: "A", localAt: 100 }
+  const at = (rev: string, print: string, extra: { same?: boolean; positioned?: boolean } = {}) => ({ rev, print, positioned: true, same: false, ...extra })
+  const rows: Array<[string, ReturnType<typeof reconcile>["action"], ReturnType<typeof reconcile>["action"]]> = [
+    ["neither changed", reconcile(at("5-a", "A"), { base }, 100).action, "none"],
+    ["only local", reconcile(at("5-a", "A"), { base }, 200).action, "push"],
+    ["only cloud", reconcile(at("6-b", "B"), { base }, 100).action, "pull"],
+    ["both", reconcile(at("6-b", "B"), { base }, 200).action, "ask"],
+    ["a new revision, same reading (opened on the Boox)", reconcile(at("6-o", "A"), { base }, 200).action, "push"],
+    ["the same revision with another print (not a change)", reconcile(at("5-a", "B"), { base }, 100).action, "none"],
+    ["no base, read here", reconcile(at("6-b", "B"), {}, 200).action, "ask"],
+    ["no base, nothing read here", reconcile(at("6-b", "B"), {}, 0).action, "pull"],
+    ["no cloud position, read here", reconcile(at("6-b", "B", { positioned: false }), {}, 200).action, "push"],
+    ["no cloud position, nothing read", reconcile(at("6-b", "B", { positioned: false }), {}, 0).action, "none"],
   ]
   for (const [name, got, want] of rows) assert.equal(got, want, name)
-
-  // Our own write in the cloud: its generation becomes the base, recorded.
-  const writes = [{ print: "W", gen: 5 }]
-  assert.deepEqual(reconcile({ cloud: "W", base, gen: 5, writes, turnedAt: 1, cloudTime: 9 }), { action: "none", base: { cloud: "W", local: 5 } })
-  assert.deepEqual(reconcile({ cloud: "W", base, gen: 6, writes, turnedAt: 1, cloudTime: 9 }), { action: "push", base: { cloud: "W", local: 5 } })
-  // Already the base: nothing to record.
-  assert.deepEqual(reconcile({ cloud: "W", base: { cloud: "W", local: 5 }, gen: 5, writes, turnedAt: 1, cloudTime: 9 }), { action: "none" })
-
-  // No base: a doc from another device, the clocks once; one from OpenCode never pulls.
-  assert.equal(reconcile({ cloud: "B", gen: 0, turnedAt: 0, cloudTime: 100 }).action, "pull")
-  assert.equal(reconcile({ cloud: "B", gen: 2, turnedAt: 200, cloudTime: 100 }).action, "push")
-  assert.equal(reconcile({ cloud: "B", gen: 2, turnedAt: 50, cloudTime: 100 }).action, "pull")
-  assert.deepEqual(reconcile({ cloud: "B", gen: 2, turnedAt: 50, cloudTime: 100, ownDevice: true, receipt: 40 }), { action: "push" })
-  assert.deepEqual(reconcile({ cloud: "B", gen: 2, turnedAt: 50, cloudTime: 10, ownDevice: true, receipt: 50 }), { action: "none", base: { cloud: "B", local: 2 } })
-  assert.deepEqual(reconcile({ cloud: "B", gen: 0, turnedAt: 0, cloudTime: 10, ownDevice: true }), { action: "none", base: { cloud: "B", local: 0 } })
+  // The same position on both sides: agreed, whatever else is known.
+  assert.deepEqual(reconcile(at("6-b", "B", { same: true }), {}, 200), { action: "none", base: { rev: "6-b", print: "B", localAt: 200 } })
+  assert.deepEqual(reconcile(at("6-b", "B", { same: true }), { base }, 300), { action: "none", base: { rev: "6-b", print: "B", localAt: 300 } })
+  // Our attempt in the cloud (answer lost): it becomes the base, its time decides the local side.
+  const attempt = { print: "W", localAt: 150 }
+  assert.deepEqual(reconcile(at("6-p", "W"), { base, attempt }, 150), { action: "none", base: { rev: "6-p", print: "W", localAt: 150 } })
+  assert.deepEqual(reconcile(at("6-p", "W"), { base, attempt }, 180), { action: "push", base: { rev: "6-p", print: "W", localAt: 150 } })
+  // Already the base revision: not taken again.
+  assert.deepEqual(reconcile(at("5-a", "W"), { base, attempt }, 100), { action: "none" })
 })
 
-test("a reading print ignores _rev, lastAccess and the save time, not the position or progress", () => {
-  const doc = bookDoc(120, "20/100", 5)
+test("a reading print is the position only: not _rev, lastAccess, update times, progress or the chapter's byte range", () => {
+  const doc = bookDoc(120, "20/100", "1-a", 5)
   const print = readingPrint(doc)
   assert.equal(readingPrint({ ...doc, _rev: "9-z", lastAccess: 99, updatedAt: 99 }), print)
-  assert.equal(readingPrint(bookDoc(120, "20/100", 77, "OpenCode")), print)
-  assert.equal(readingPrint(bookDoc(120, " 20 / 100 ", 5)), print)
-  assert.notEqual(readingPrint(bookDoc(121, "20/100", 5)), print)
-  assert.notEqual(readingPrint(bookDoc(120, "21/100", 5)), print)
+  assert.equal(readingPrint(bookDoc(120, "21/100", "2-b", 77)), print)
+  assert.equal(readingPrint({ ...doc, extraAttributes: String(doc.extraAttributes).replace("1000", "1200") }), print)
+  assert.notEqual(readingPrint(bookDoc(121, "20/100", "1-a", 5)), print)
 })
 
-test("the base keeps the latest local generation, and the writes the last five", () => {
-  let mark = withBase(undefined, { cloud: "A", local: 6 })
-  mark = withBase(mark, { cloud: "B", local: 5 })
-  assert.deepEqual(mark.base, { cloud: "A", local: 6 })
-  assert.deepEqual(withBase(mark, { cloud: "C", local: 6 }).base, { cloud: "C", local: 6 })
-  for (let i = 0; i < 10; i++) mark = withWrite(mark, { print: `w${i}`, gen: i })
-  assert.deepEqual(mark.writes!.map((w) => w.gen), [5, 6, 7, 8, 9])
+test("an invalid sync record reads as no base and no attempt, never throws", () => {
+  for (const junk of [null, 3, "x", [], { writes: [null] }, { base: { rev: 3, print: "A", localAt: 1 } }, { base: { rev: "1", print: "A", localAt: -1 } }, { base: null, attempt: { print: 1 } }])
+    assert.deepEqual(validMark(junk), {})
+  assert.deepEqual(validMark({ base: { rev: "1", print: "A", localAt: 5 }, attempt: { print: "B" } }), { base: { rev: "1", print: "A", localAt: 5 } })
 })
 
-test("1. the Boox opening the book (lastAccess and _rev only) leaves the local reading to push", async () => {
-  const f = await adopted(bookDoc(100, "20/100", 2_000))
-  f.cloud.booxOpens(9_000)
-  const local = { gen: 2, turnedAt: 5_000 }
-  assert.equal((await f.pull(local)).action, "push")
-  assert.deepEqual(await f.push(local, 300), { pushed: true, at: 10_000, progress: "30/100" })
-  assert.equal(f.cloud.puts, 1)
+test("a corrupt onyx-sync.json: no throw, the reader is asked", async () => {
+  const f = fakeCloud(bookDoc(100, "20/100", "1-a"))
+  f.cloud.raw = { writes: [null], base: { rev: 1, print: [], localAt: "x" } }
+  assert.equal((await f.pull(f.local(300, 2_000))).action, "ask")
+  assert.deepEqual(await f.push(f.local(300, 2_000)), { pushed: false, action: "ask" })
+  assert.equal(f.cloud.puts, 0)
 })
 
-test("2. a due push replayed after the Boox read further, nothing turned here: pulled, Boox clock behind", async () => {
-  const f = await adopted(bookDoc(100, "20/100", 2_000))
-  const mine = { gen: 2, turnedAt: 5_000 }
-  await f.push(mine, 300)
-  f.cloud.booxSaves(500, "50/100", 1_000) // Its clock far behind ours.
-  assert.deepEqual(await f.push(mine, 300), { pushed: false, reason: "the Boox is newer", pull: true })
-  assert.equal(f.cloud.puts, 1)
-  const pulled = await f.pull(mine)
-  assert.deepEqual([pulled.action, pulled.spine, pulled.offset], ["pull", 1, 500])
+test("blocker: the Boox going back to a position we once wrote is pulled", async () => {
+  const f = await adopted(bookDoc(100, "20/100", "1-a"))
+  assert.equal((await f.push(f.local(300, 2_000))).pushed, true)
+  assert.equal((await f.push(f.local(400, 3_000))).pushed, true)
+  f.cloud.booxSaves(300)
+  const pulled = await f.pull(f.local(400, 3_000))
+  assert.deepEqual([pulled.action, pulled.offset], ["pull", 300])
+  assert.deepEqual(await f.push(f.local(400, 3_000)), { pushed: false, action: "pull", agreedAt: 3_000 })
 })
 
-test("3. onyx-sync.json lost, the cloud holds our old write, a page turned since: no pull back, pushed", async () => {
-  const f = fakeCloud(bookDoc(200, "20/100", 4_000, "OpenCode"))
-  // The old TUI's receipt: the reading of 3000 was sent; a page turned at 3500 (the server's stamp is later).
-  const local = { gen: 1, turnedAt: 3_500, receipt: 3_000 }
-  assert.equal((await f.pull(local)).action, "push")
-  assert.equal(f.cloud.mark, undefined)
-  assert.equal((await f.push(local, 300)).pushed, true)
-  assert.deepEqual(f.io.mark()?.base, { cloud: readingPrint(f.cloud.doc), local: 1 })
-  // No turn since the receipt: ambiguous, the local position stays and both sides agree from now on.
-  const g = fakeCloud(bookDoc(200, "20/100", 4_000, "OpenCode"))
-  assert.equal((await g.pull({ gen: 0, turnedAt: 3_000, receipt: 3_000 })).action, "none")
-  assert.deepEqual(g.cloud.mark?.base, { cloud: readingPrint(g.cloud.doc), local: 0 })
-  g.cloud.booxSaves(600, "60/100", 1) // Then the Boox reads on: pulled, whatever its clock.
-  assert.equal((await g.pull({ gen: 0, turnedAt: 3_000, receipt: 3_000 })).action, "pull")
-})
-
-test("4. two windows: one adopts the Boox position, the other closes with an older one: the adopted stays", async () => {
-  const f = await adopted(bookDoc(100, "20/100", 2_000))
-  await f.push({ gen: 5, turnedAt: 5_000 }, 300) // Both windows held generation 5.
-  f.cloud.booxSaves(500, "50/100", 6_000)
-  // Window A pulls, applies it as generation 6.
-  const pulled = await f.pull({ gen: 5, turnedAt: 5_000 })
+test("blocker: a window holding an older reading overwrites neither the stored one nor the cloud", async () => {
+  const f = await adopted(bookDoc(100, "20/100", "1-a"))
+  await f.push(f.local(300, 2_000)) // Both windows were there.
+  f.cloud.booxSaves(500)
+  // Window A applies the Boox position at 5000.
+  const pulled = await f.pull(f.local(300, 2_000))
   assert.equal(pulled.action, "pull")
-  f.agree(pulled.print, 6)
-  // Window B closes on its generation-5 position: nothing sent.
-  assert.deepEqual(await f.push({ gen: 5, turnedAt: 5_000 }, 300), { pushed: false, reason: "in sync" })
+  f.agree(pulled, 5_000)
+  // Window B closes on its reading of 2000: nothing sent, the Boox position stays.
+  assert.deepEqual(await f.push(f.local(300, 2_000)), { pushed: false, action: "none", agreedAt: 5_000 })
   assert.equal(f.cloud.puts, 1)
-  assert.equal(f.cloud.doc.progress, "50/100")
-  // A stale agree never lowers the base.
-  f.agree("old", 5)
-  assert.deepEqual(f.cloud.mark?.base, { cloud: pulled.print, local: 6 })
+  assert.equal(readingPrint(f.cloud.doc), pulled.print)
 })
 
-test("5. a Boox clock 5 minutes ahead, nothing changed there: the local reading wins", async () => {
-  const f = await adopted(bookDoc(100, "20/100", 1_000 + 300_000))
-  const local = { gen: 2, turnedAt: 2_000 }
-  assert.equal((await f.pull(local)).action, "push")
-  assert.equal((await f.push(local, 300)).pushed, true)
+test("blocker: a lost agree then a page turn asks, never pulls silently; without a turn both sides agree", async () => {
+  const f = await adopted(bookDoc(100, "20/100", "1-a"))
+  f.cloud.booxSaves(500)
+  assert.equal((await f.pull(f.local(100, 1_000))).action, "pull")
+  // Applied here at 5000, but the agree is lost.
+  assert.deepEqual(await f.push(f.local(500, 5_000, 50)), { pushed: false, action: "none", agreedAt: 5_000 })
+  const g = await adopted(bookDoc(100, "20/100", "1-a"))
+  g.cloud.booxSaves(500)
+  await g.pull(g.local(100, 1_000))
+  // Applied at 5000 (agree lost), then a page turn at 6000.
+  assert.deepEqual(await g.push(g.local(600, 6_000)), { pushed: false, action: "ask", agreedAt: 1_000 })
+  assert.equal((await g.pull(g.local(600, 6_000))).action, "ask")
+  assert.equal(g.cloud.puts, 0)
 })
 
-test("6. a real conflict: the later of the page turn and the Boox's save wins", async () => {
-  const f = await adopted(bookDoc(100, "20/100", 1_000))
-  f.cloud.booxSaves(500, "50/100", 3_000)
-  assert.deepEqual(await f.push({ gen: 2, turnedAt: 2_000 }, 300), { pushed: false, reason: "the Boox is newer", pull: true })
-  assert.equal((await f.pull({ gen: 2, turnedAt: 2_000 })).action, "pull")
-  assert.equal((await f.push({ gen: 2, turnedAt: 4_000 }, 300)).pushed, true)
+test("blocker: a missing or skewed Boox save time changes nothing", async () => {
+  for (const updateTime of [undefined, 1, 10 ** 13]) {
+    const f = await adopted(bookDoc(100, "20/100", "1-a", updateTime))
+    assert.equal((await f.push(f.local(300, 2_000))).pushed, true)
+    f.cloud.booxSaves(500, "50/100", updateTime)
+    assert.equal((await f.pull(f.local(300, 2_000))).action, "pull")
+    assert.equal((await f.pull(f.local(350, 3_000))).action, "ask")
+  }
 })
 
-test("7. our PUT accepted, its answer lost, a page turned meanwhile: known as ours, pushed again, not pulled", async () => {
-  const f = await adopted(bookDoc(100, "20/100", 1_000))
+test("the Boox opening the book (lastAccess and _rev only) leaves the local reading to push", async () => {
+  const f = await adopted(bookDoc(100, "20/100", "1-a", 2_000))
+  f.cloud.booxOpens(9_000)
+  assert.equal((await f.pull(f.local(300, 5_000))).action, "push")
+  assert.deepEqual(await f.push(f.local(300, 5_000)), { pushed: true, at: 10_000, progress: "30/100", agreedAt: 5_000 })
+})
+
+test("our PUT accepted, its answer lost, a page turned meanwhile: known as ours, pushed again", async () => {
+  const f = await adopted(bookDoc(100, "20/100", "1-a"))
   f.cloud.lose = true
-  await assert.rejects(f.push({ gen: 2, turnedAt: 2_000 }, 300), /socket hang up/)
+  await assert.rejects(f.push(f.local(300, 2_000)), /socket hang up/)
   assert.equal(f.cloud.puts, 1)
-  f.cloud.now = 50_000 // The server's stamp is later than the next page turn here.
-  const local = { gen: 3, turnedAt: 3_000 }
-  assert.equal((await f.pull(local)).action, "push")
-  assert.deepEqual(f.cloud.mark?.base, { cloud: readingPrint(f.cloud.doc), local: 2 })
-  assert.equal((await f.push(local, 320)).pushed, true)
-  assert.equal(f.cloud.puts, 2)
-  // Without the turn: nothing to do.
-  assert.equal((await f.pull(local)).action, "none")
+  assert.equal((await f.pull(f.local(350, 3_000))).action, "push")
+  assert.deepEqual(validMark(f.cloud.raw), { base: { rev: String(f.cloud.doc._rev), print: readingPrint(f.cloud.doc), localAt: 2_000 } })
+  assert.equal((await f.push(f.local(350, 3_000))).pushed, true)
+  assert.equal((await f.pull(f.local(350, 3_000))).action, "none")
 })
 
-test("8. a book is finished (total/total) only by the push of a forward turn onto the last screen", async () => {
-  const f = await adopted(bookDoc(100, "20/100", 1_000))
+test("no base: asked when read on both sides, agreed when at the same position", async () => {
+  const f = fakeCloud(bookDoc(100, "20/100", "1-a"))
+  assert.equal((await f.pull(f.local(300, 2_000))).action, "ask")
+  assert.deepEqual(await f.push(f.local(300, 2_000)), { pushed: false, action: "ask" })
+  const g = fakeCloud(bookDoc(100, "20/100", "1-a"))
+  const same = await g.pull(g.local(100, 2_000))
+  assert.deepEqual([same.action, same.agreedAt], ["none", 2_000])
+  assert.deepEqual(validMark(g.cloud.raw).base, { rev: "1-a", print: readingPrint(g.cloud.doc), localAt: 2_000 })
+})
+
+test("keeping this computer's reading is a forced push; a 409 asks again", async () => {
+  const f = await adopted(bookDoc(100, "20/100", "1-a"))
+  f.cloud.booxSaves(500)
+  f.cloud.conflict = true
+  assert.deepEqual(await f.push(f.local(300, 2_000), true), { pushed: false, action: "ask" })
+  assert.deepEqual(await f.push(f.local(300, 2_000), true), { pushed: true, at: 10_000, progress: "30/100", agreedAt: 2_000 })
+  assert.equal((await f.pull(f.local(300, 2_000))).action, "none")
+})
+
+test("a book is finished (total/total) only by the push of a forward turn onto the last screen", async () => {
+  const f = await adopted(bookDoc(100, "20/100", "1-a"))
   // On the last screen, not finished (opened there, or back then forward without the finishing turn).
-  assert.deepEqual(await f.push({ gen: 2, turnedAt: 2_000 }, 9_000, 100, false), { pushed: true, at: 10_000, progress: "99/100" })
-  // The forward turn onto it: same position, finished: still written.
-  assert.deepEqual(await f.push({ gen: 3, turnedAt: 3_000 }, 9_000, 100, true), { pushed: true, at: 10_000, progress: "100/100" })
-  // Unchanged since: nothing.
-  assert.deepEqual(await f.push({ gen: 3, turnedAt: 3_000 }, 9_000, 100, true), { pushed: false, reason: "in sync" })
-  // Same position and progress as the cloud's, from another generation: agreed, not written.
-  assert.deepEqual(await f.push({ gen: 4, turnedAt: 4_000 }, 9_000, 100, true), { pushed: false, reason: "same position" })
+  assert.equal((await f.push(f.local(9_000, 2_000, 100, false))).pushed, true)
+  assert.equal(f.cloud.doc.progress, "99/100")
+  // The forward turn onto it: same position, now finished: written.
+  assert.equal((await f.push(f.local(9_000, 3_000, 100, true))).pushed, true)
+  assert.equal(f.cloud.doc.progress, "100/100")
+  assert.deepEqual(await f.push(f.local(9_000, 3_000, 100, true)), { pushed: false, action: "none", agreedAt: 3_000 })
   assert.equal(f.cloud.puts, 2)
-  assert.equal(f.cloud.mark?.base?.local, 4)
+})
+
+test("a cloud doc with no reading position is not written", async () => {
+  const f = fakeCloud({ ...bookDoc(100, "20/100", "1-a"), extraAttributes: JSON.stringify({ backend: { total_page: 100 } }) })
+  assert.equal((await f.pull(f.local(300, 2_000))).action, "push")
+  await assert.rejects(f.push(f.local(300, 2_000)), /no reading position in the cloud yet/)
+  assert.equal(f.cloud.puts, 0)
 })

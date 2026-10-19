@@ -255,17 +255,14 @@ export function savedTimes(
 }
 
 /**
- * A save keeps the stored reading when its generation is past the one held
- * here (`gen`): another window moved meanwhile (a page turn, or a Boox
- * position applied), and its position must not be overwritten.
+ * A save keeps the stored reading when it is newer than the one held here
+ * (`turnedAt`, the time this window's position was reached by a page turn or
+ * an applied Boox position; one clock for all windows of this computer):
+ * another window moved meanwhile, and its position and time must not be
+ * overwritten.
  */
-export function keepsStored(stored: { gen?: number } | undefined, gen: number): boolean {
-  return !!stored && (stored.gen ?? 0) > gen
-}
-
-/** The generation of a new local position: past this window's and the stored one (any window's). */
-export function nextGen(held: number, stored: number | undefined): number {
-  return Math.max(held, stored ?? 0) + 1
+export function keepsStored(stored: { updatedAt: number } | undefined, turnedAt: number): boolean {
+  return !!stored && stored.updatedAt > turnedAt
 }
 
 /** Where to open a Boox book: its Boox position when read there more recently. */
