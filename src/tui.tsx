@@ -324,8 +324,8 @@ export default Plugin.define({
         }).catch(() => {})
     }
 
-    /** Offers one snapshot to the server, which pushes it or says why not; `force`: the reader chose this computer's. */
-    const pushOnce = async (key: string, s: Snapshot, force = false) => {
+    /** Offers one snapshot to the server, which pushes it or says why not; `force`: the reader chose this computer's over that cloud revision. */
+    const pushOnce = async (key: string, s: Snapshot, force?: string) => {
       if (!syncable(s)) return
       if (!force && ackOf(key) >= s.turnedAt) return settle(key, s.turnedAt) // This reading is already in the cloud.
       if (!(await settings())?.cloud) return
@@ -344,9 +344,9 @@ export default Plugin.define({
       else if (result.action === "none") acked.set(key, s.turnedAt)
       else if (result.action === "ask") noteAsk(s.book, !force)
       settle(key, result.agreedAt)
-      // To pull, or a forced push refused (409): read the cloud again, when the book is open here (opening it does anyway).
+      // To pull, or a forced push refused (the cloud moved): read the cloud again, when the book is open here (opening it does anyway).
       const b = book()
-      if (!result.pushed && (result.action === "pull" || (force && result.action === "ask")) && b?.key === key) void syncPull(b, true)
+      if (!result.pushed && (result.action === "pull" || (force !== undefined && result.action === "ask")) && b?.key === key) void syncPull(b, true)
     }
     const queuePush = pushQueue<Snapshot>(pushOnce)
     /** Pushes per book run one at a time; the latest snapshot offered meanwhile goes next. */
@@ -384,7 +384,7 @@ export default Plugin.define({
      * per book at most, except when the book is opened (`force`).
      */
     const lastPull = new Map<string, number>()
-    const syncPull = async (b: Book, force = false) => {
+    const syncPull = async (b: Book, force = false, retried = false) => {
       const s = snapshot()
       if (!b.booxPath || s?.book.key !== b.key) return
       if (!force && Date.now() - (lastPull.get(b.key) ?? 0) < PULL_MIN_INTERVAL_MS) return
@@ -394,6 +394,7 @@ export default Plugin.define({
       }
       lastPull.set(b.key, Date.now())
       const before = position()
+      const storedAt = store.books[b.key]?.updatedAt ?? 0
       const result = (await reader
         .pull({ path: b.path, booxPath: b.booxPath, spine: before.spine, offset: before.offset, percent: s.percent, finished: s.finished, turnedAt: s.turnedAt })
         .catch((e) => ({ ok: false, state: "error", error: failure(e) }))) as PullResult
@@ -414,10 +415,11 @@ export default Plugin.define({
         if (c.unmapped || c.spine !== undefined) tellFailure(b.key, UNMAPPED_MESSAGE)
         return
       }
+      let choice: "boox" | "here" | "later" | undefined = "boox"
       if (c.action === "ask") {
         noteAsk(b, false)
         setDialogOpen(true)
-        const choice = await context.ui.dialog
+        choice = await context.ui.dialog
           .select<"boox" | "here" | "later">({
             title: `${b.title}: read on both sides`,
             options: [
@@ -427,9 +429,11 @@ export default Plugin.define({
             ],
           })
           .finally(() => setDialogOpen(false))
-        if (choice === "here" && still()) return void pushOnce(b.key, s, true)
-        if (choice !== "boox" || !still()) return
       }
+      if ((choice !== "boox" && choice !== "here") || !still()) return
+      // Another window read meanwhile: this answer is stale, decided again (once).
+      if (keepsStored(store.books[b.key], storedAt)) return void (retried || syncPull(b, true, true))
+      if (choice === "here") return void pushOnce(b.key, s, c.rev)
       // Applied here now: the newest local reading, which no older window overwrites.
       const turnedAt = Date.now()
       reading = { key: b.key, turnedAt }

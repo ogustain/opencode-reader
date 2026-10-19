@@ -280,7 +280,9 @@ export type Action = "none" | "push" | "pull" | "ask"
  * compared.
  *
  * - the same position (and finished state) on both sides: nothing, agreed;
- * - the cloud doc is our attempted write (answer lost): it becomes the base;
+ * - the cloud doc reads as our attempted write (answer lost): it becomes the
+ *   base if nothing was read here since; else ask (the Boox may have written
+ *   the same reading);
  * - no reading in the cloud: push a local one (refused there, with its reason);
  * - no base: pull when nothing was read here, else ask;
  * - one side changed: it wins; neither: nothing; both: ask.
@@ -294,14 +296,19 @@ export function reconcile(
 ): { action: Action; base?: Base } {
   if (cloud.same) return { action: "none", base: { rev: cloud.rev, print: cloud.print, localAt: turnedAt } }
   const attempt = mark.attempt
-  const ours = !!attempt && attempt.print === cloud.print && cloud.rev !== mark.base?.rev
-  const base = ours ? { rev: cloud.rev, print: cloud.print, localAt: attempt.localAt } : mark.base
-  const record = ours ? { base } : {}
+  if (attempt && attempt.print === cloud.print && cloud.rev !== mark.base?.rev)
+    return turnedAt <= attempt.localAt ? { action: "none", base: { rev: cloud.rev, print: cloud.print, localAt: attempt.localAt } } : { action: "ask" }
+  const base = mark.base
   const localChanged = turnedAt > (base?.localAt ?? 0)
-  if (!cloud.positioned) return { action: localChanged ? "push" : "none", ...record }
+  if (!cloud.positioned) return { action: localChanged ? "push" : "none" }
   if (!base) return { action: localChanged ? "ask" : "pull" }
   const cloudChanged = cloud.rev !== base.rev && cloud.print !== base.print
-  return { action: cloudChanged ? (localChanged ? "ask" : "pull") : localChanged ? "push" : "none", ...record }
+  return { action: cloudChanged ? (localChanged ? "ask" : "pull") : localChanged ? "push" : "none" }
+}
+
+/** A mark with a new agreement (the attempt cleared), unless the stored one is of a later local reading: then kept. */
+export function withBase(mark: CloudMark, base: Base): CloudMark {
+  return mark.base && mark.base.localAt > base.localAt ? mark : { base }
 }
 
 /** The local reading the TUI holds: its position, % and finished state, and its page-turn time (0 before any). */
@@ -331,10 +338,10 @@ function decide(io: DocIo, doc: Doc, local: LocalReading) {
     positioned: !!reading.point,
     same: same(local.position, at) && done(doc.progress) === local.finished,
   }
-  const mark = io.mark()
-  const decision = reconcile(cloud, mark, local.turnedAt)
-  if (decision.base) io.setMark({ base: decision.base })
-  return { ...decision, cloud, reading, at, agreedAt: (decision.base ?? mark.base)?.localAt }
+  const decision = reconcile(cloud, io.mark(), local.turnedAt)
+  const mark = decision.base ? withBase(io.mark(), decision.base) : io.mark()
+  if (decision.base) io.setMark(mark)
+  return { ...decision, cloud, reading, at, agreedAt: mark.base?.localAt }
 }
 
 /** The cloud reading of a book, in the plugin's terms, with the decision for the local reading. */
@@ -357,8 +364,9 @@ export async function pullDoc(io: DocIo, local: LocalReading) {
 
 /**
  * Sends the local reading when `reconcile` says so, or whatever it says when
- * `force`d (the reader chose this computer's). GET, then PUT with the
- * revision; a 409 decides again, once (a forced push asks again instead).
+ * `force`d: the reader chose this computer's over the doc at revision
+ * `force` (another revision now: ask again, nothing written). GET, then PUT
+ * with the revision; a 409 decides again, once (a forced push asks again).
  * The write is recorded as our attempt before the PUT, the agreement (with
  * the revision the PUT returns) after it. `agreedAt`: the local page-turn
  * time of the agreement then. Refusals throw.
@@ -366,12 +374,13 @@ export async function pullDoc(io: DocIo, local: LocalReading) {
 export async function pushDoc(
   io: DocIo,
   local: LocalReading,
-  force = false,
+  force?: string,
 ): Promise<{ pushed: true; at: number; progress: unknown; agreedAt: number } | { pushed: false; action: Action; agreedAt?: number }> {
   for (let attempt = 0; ; attempt++) {
     const doc = await io.getDoc()
+    if (force !== undefined && str(doc._rev) !== force) return { pushed: false, action: "ask" }
     const { action, reading, agreedAt } = decide(io, doc, local)
-    if (action !== "push" && !(force && action !== "none")) return { pushed: false, action, ...(agreedAt !== undefined ? { agreedAt } : {}) }
+    if (action !== "push" && !(force !== undefined && action !== "none")) return { pushed: false, action, ...(agreedAt !== undefined ? { agreedAt } : {}) }
     const fields = io.toNeo(local.position)
     if (!fields) throw new Error("unknown chapter")
     // Same chapter as the cloud: keep the byte range NeoReader computed.
@@ -392,11 +401,11 @@ export async function pushDoc(
       rev = await io.putDoc(patched)
     } catch (error) {
       if (!io.isConflict(error)) throw error
-      if (force) return { pushed: false, action: "ask" }
+      if (force !== undefined) return { pushed: false, action: "ask" }
       if (attempt > 0) throw error
       continue
     }
-    io.setMark({ base: { rev, print, localAt: local.turnedAt } })
+    io.setMark(withBase(io.mark(), { rev, print, localAt: local.turnedAt }))
     return { pushed: true, at: now, progress: patched.progress, agreedAt: local.turnedAt }
   }
 }

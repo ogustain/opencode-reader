@@ -303,6 +303,9 @@ test("a window holding an older reading never overwrites a newer stored one", ()
   // Window B turned to a later page at 200 and saved; window A still holds its position read at 100.
   assert.equal(keepsStored({ updatedAt: 200 }, 100), true)
   assert.equal(keepsStored({ updatedAt: 200 }, 200), false) // Its own save.
+  // A pull answer is applied only if no window read since it was asked (stored 200 then).
+  assert.equal(keepsStored({ updatedAt: 250 }, 200), true)
+  assert.equal(keepsStored({ updatedAt: 200 }, 200), false)
   assert.equal(keepsStored({ updatedAt: 100 }, 250), false) // A turned a page since: A wins.
   assert.equal(keepsStored({ updatedAt: 100 }, 0), true) // Opened without turning, after another window read.
   assert.equal(keepsStored(undefined, 0), false)

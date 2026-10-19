@@ -63,7 +63,7 @@ export type CloudPosition = {
 export type PullResult = { ok: true; cloud: CloudPosition } | { ok: false; state: OnyxState; error: string }
 export type PushResult =
   | { ok: true; pushed: true; at: number; agreedAt: number }
-  /** Not sent: `action` says why (`reconcile`; "ask" after a 409 on a forced push). */
+  /** Not sent: `action` says why (`reconcile`; "ask" when a forced push meets another revision). */
   | { ok: true; pushed: false; action: Action; agreedAt?: number }
   | { ok: false; state: OnyxState; error: string }
 
@@ -90,7 +90,7 @@ export const ReaderRpc = Rpc.define({
     pull: { input: object, output: object },
     /** { booxPath, rev, print, turnedAt } → { ok } (the cloud reading `print` at `rev` was applied locally at `turnedAt`) */
     agree: { input: object, output: object },
-    /** { path, booxPath, spine, offset, percent, finished, turnedAt, force? } → PushResult (GET, then PUT of the book doc) */
+    /** { path, booxPath, spine, offset, percent, finished, turnedAt, force? } → PushResult (GET, then PUT of the book doc; `force`: the `_rev` the reader chose over) */
     push: { input: object, output: object },
   },
   events: {},

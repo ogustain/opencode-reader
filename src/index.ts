@@ -35,7 +35,7 @@ import {
   type PushResult,
 } from "./rpc.ts"
 import {
-  cloudLibrary, pullDoc, pushDoc, toLocal, toNeo, validMark, withPushedProgress, type CloudLibrary, type DocIo, type LocalReading, type NeoRef,
+  cloudLibrary, pullDoc, pushDoc, toLocal, toNeo, validMark, withBase, withPushedProgress, type CloudLibrary, type DocIo, type LocalReading, type NeoRef,
 } from "./sync.ts"
 
 const BOOX_MIN_INTERVAL_MS = 60_000
@@ -43,7 +43,7 @@ const CLOUD_MIN_INTERVAL_MS = 60_000
 
 type Json = Parameters<Plugin.Context["storage"]["set"]>[1]
 
-/** The local reading sent by the TUI: `gen`, `turnedAt` and an optional `receipt`; undefined when invalid. */
+/** The local reading sent by the TUI: its position, %, finished state and page-turn time; undefined when invalid. */
 function readingOf(input: Record<string, unknown>): LocalReading | undefined {
   const { spine, offset, percent, finished, turnedAt } = input
   const valid = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0
@@ -313,7 +313,7 @@ export default Plugin.define({
         if (typeof booxPath !== "string" || !base) return { ok: false }
         try {
           const book = await cloudBook(booxPath)
-          if (book) updateMark(syncFile, book.id, () => ({ base }))
+          if (book) updateMark(syncFile, book.id, (mark) => withBase(validMark(mark), base))
           return { ok: !!book }
         } catch {
           return { ok: false }
@@ -331,7 +331,7 @@ export default Plugin.define({
           const copy = ((await load<CacheManifest>("cache")) ?? {})[resolve(path)]
           if (!copy || copy.booxPath !== booxPath || (book.size > 0 && copy.size !== book.size))
             return { ok: false, state: "error", error: "the local copy is not the Boox file" }
-          const result = await docLock(book.id)(() => pushDoc(docIo(book.id, path), local, force === true))
+          const result = await docLock(book.id)(() => pushDoc(docIo(book.id, path), local, typeof force === "string" ? force : undefined))
           if (!result.pushed) return { ok: true, ...result }
           // The cached listing shows the new %, and hides a book finished here, before the next library read.
           cloud = { ...cloud, books: withPushedProgress(cloud.books, book.id, result.progress) }

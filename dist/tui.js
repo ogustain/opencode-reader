@@ -353,8 +353,8 @@ export default Plugin.define({
       }).catch(() => {});
     };
 
-    /** Offers one snapshot to the server, which pushes it or says why not; `force`: the reader chose this computer's. */
-    const pushOnce = async (key, s, force = false) => {
+    /** Offers one snapshot to the server, which pushes it or says why not; `force`: the reader chose this computer's over that cloud revision. */
+    const pushOnce = async (key, s, force) => {
       if (!syncable(s)) return;
       if (!force && ackOf(key) >= s.turnedAt) return settle(key, s.turnedAt); // This reading is already in the cloud.
       if (!(await settings())?.cloud) return;
@@ -386,9 +386,9 @@ export default Plugin.define({
       // Acknowledge the snapshot that was sent, not whatever was read meanwhile.
       if (result.pushed) acknowledge(key, s.turnedAt);else if (result.action === "none") acked.set(key, s.turnedAt);else if (result.action === "ask") noteAsk(s.book, !force);
       settle(key, result.agreedAt);
-      // To pull, or a forced push refused (409): read the cloud again, when the book is open here (opening it does anyway).
+      // To pull, or a forced push refused (the cloud moved): read the cloud again, when the book is open here (opening it does anyway).
       const b = book();
-      if (!result.pushed && (result.action === "pull" || force && result.action === "ask") && b?.key === key) void syncPull(b, true);
+      if (!result.pushed && (result.action === "pull" || force !== undefined && result.action === "ask") && b?.key === key) void syncPull(b, true);
     };
     const queuePush = pushQueue(pushOnce);
     /** Pushes per book run one at a time; the latest snapshot offered meanwhile goes next. */
@@ -442,7 +442,7 @@ export default Plugin.define({
      * per book at most, except when the book is opened (`force`).
      */
     const lastPull = new Map();
-    const syncPull = async (b, force = false) => {
+    const syncPull = async (b, force = false, retried = false) => {
       const s = snapshot();
       if (!b.booxPath || s?.book.key !== b.key) return;
       if (!force && Date.now() - (lastPull.get(b.key) ?? 0) < PULL_MIN_INTERVAL_MS) return;
@@ -452,6 +452,7 @@ export default Plugin.define({
       }
       lastPull.set(b.key, Date.now());
       const before = position();
+      const storedAt = store.books[b.key]?.updatedAt ?? 0;
       const result = await reader.pull({
         path: b.path,
         booxPath: b.booxPath,
@@ -488,10 +489,11 @@ export default Plugin.define({
         if (c.unmapped || c.spine !== undefined) tellFailure(b.key, UNMAPPED_MESSAGE);
         return;
       }
+      let choice = "boox";
       if (c.action === "ask") {
         noteAsk(b, false);
         setDialogOpen(true);
-        const choice = await context.ui.dialog.select({
+        choice = await context.ui.dialog.select({
           title: `${b.title}: read on both sides`,
           options: [{
             title: `Keep the Boox position (${pct(c.percent ?? 0)}${c.updateTime > 0 ? `, read ${ago(c.updateTime)}` : ""})`,
@@ -504,9 +506,11 @@ export default Plugin.define({
             value: "later"
           }]
         }).finally(() => setDialogOpen(false));
-        if (choice === "here" && still()) return void pushOnce(b.key, s, true);
-        if (choice !== "boox" || !still()) return;
       }
+      if (choice !== "boox" && choice !== "here" || !still()) return;
+      // Another window read meanwhile: this answer is stale, decided again (once).
+      if (keepsStored(store.books[b.key], storedAt)) return void (retried || syncPull(b, true, true));
+      if (choice === "here") return void pushOnce(b.key, s, c.rev);
       // Applied here now: the newest local reading, which no older window overwrites.
       const turnedAt = Date.now();
       reading = {
