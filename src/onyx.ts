@@ -118,6 +118,9 @@ export function publishFile(temp: string, dest: string, size?: number): void {
 
 /** Largest book file downloaded, as for the ADB copy (its 512 MiB buffer). */
 export const MAX_BOOK_FILE = 512 * 1024 * 1024
+/** Largest JSON reply read: the library feed (`_changes`), any other request. */
+export const MAX_LIBRARY_JSON = 32 * 1024 * 1024
+export const MAX_JSON = 4 * 1024 * 1024
 
 export type StsCredentials = { AccessKeyId: string; AccessKeySecret: string; SecurityToken: string; Expiration: string }
 export type OssBucket = { bucket: string; endpoint: string }
@@ -230,9 +233,34 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       throw new OnyxError("offline", "Onyx cloud unreachable")
     }
   }
-  const json = async (response: Response): Promise<unknown> => {
+  /** Reads a JSON body of at most `max` bytes, stopping as soon as it is over. */
+  const json = async (response: Response, max = MAX_JSON): Promise<unknown> => {
+    const tooLarge = () => new OnyxError("error", "Onyx cloud: response too large")
+    if (Number(response.headers.get("content-length") ?? 0) > max) {
+      void response.body?.cancel().catch(() => {})
+      throw tooLarge()
+    }
+    const chunks: Uint8Array[] = []
+    let total = 0
+    const reader = response.body?.getReader()
+    for (;;) {
+      if (!reader) break
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch {
+        throw new OnyxError("offline", "Onyx cloud unreachable")
+      }
+      if (chunk.done) break
+      total += chunk.value.length
+      if (total > max) {
+        void reader.cancel().catch(() => {})
+        throw tooLarge()
+      }
+      chunks.push(chunk.value)
+    }
     try {
-      return await response.json()
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"))
     } catch {
       throw new OnyxError("error", "Onyx cloud: invalid response")
     }
@@ -321,11 +349,11 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     }
   }
 
-  const ok = async (response: Response): Promise<unknown> => {
+  const ok = async (response: Response, max?: number): Promise<unknown> => {
     if (response.status === 401) throw new OnyxError("expired", EXPIRED_MESSAGE)
     if (response.status === 409) throw new OnyxError("conflict", "Onyx cloud: the book changed meanwhile")
     if (!response.ok) throw new OnyxError("error", `Onyx cloud: HTTP ${response.status}`)
-    return json(response)
+    return json(response, max)
   }
 
   const userId = async (): Promise<string> => {
@@ -450,7 +478,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     async library() {
       const uid = await userId()
       const query = `filter=sync_gateway/bychannel&channels=${encodeURIComponent(`${uid}-READER_LIBRARY`)}&include_docs=true`
-      const body = (await ok(await gateway(`_changes?${query}`, {}, 60_000))) as { results?: Array<{ doc?: CloudDoc; deleted?: boolean; removed?: unknown }> }
+      const body = (await ok(await gateway(`_changes?${query}`, {}, 60_000), MAX_LIBRARY_JSON)) as { results?: Array<{ doc?: CloudDoc; deleted?: boolean; removed?: unknown }> }
       if (!Array.isArray(body?.results)) throw new OnyxError("error", "Onyx cloud: invalid library")
       return body.results
         .filter((r) => !r.deleted && !r.removed && r.doc && !r.doc._deleted && typeof r.doc._id === "string")

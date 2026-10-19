@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  createOnyx, EXPIRED_MESSAGE, MAX_BOOK_FILE, OnyxError, ossBookKey, ossBucketOf, ossRequest, ossSignature, ossStringToSign, readToken, saveBackup, tokenFingerprint,
+  createOnyx, EXPIRED_MESSAGE, MAX_BOOK_FILE, MAX_JSON, MAX_LIBRARY_JSON, OnyxError, ossBookKey, ossBucketOf, ossRequest, ossSignature, ossStringToSign, readToken, saveBackup, tokenFingerprint,
   type CloudDoc,
 } from "./onyx.ts"
 
@@ -378,4 +378,40 @@ test("every request refuses redirects and has a timeout", async () => {
     assert.equal(init.redirect, "error")
     assert.ok(init.signal instanceof AbortSignal)
   }
+})
+
+test("JSON replies are read up to a byte cap, and stop there", async () => {
+  const MiB = 1024 * 1024
+  /** A reply to `match` that streams `size` bytes (endless when undefined), declared or not. */
+  const huge = (match: string, size: number | undefined, declare = false) => {
+    let pulled = 0
+    const cloud = fakeCloud({ docs: [{ _id: "u1#b1", modeType: 4 }] })
+    const fake = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      if (!String(input).includes(match)) return cloud.fetch(input, init)
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (size !== undefined && pulled >= size) return controller.close()
+          pulled += MiB
+          controller.enqueue(new Uint8Array(MiB).fill(32))
+        },
+      })
+      return new Response(body, { status: 200, headers: declare && size !== undefined ? { "content-length": String(size) } : {} })
+    }) as typeof fetch
+    return { onyx: createOnyx({ ...files(), fetch: fake, now: () => NOW }), pulled: () => pulled }
+  }
+  const tooLarge = (e: OnyxError) => e.state === "error" && /too large/.test(e.message)
+
+  const endless = huge("u1%23b1", undefined)
+  await assert.rejects(endless.onyx.getDoc("u1#b1"), tooLarge)
+  assert.ok(endless.pulled() <= MAX_JSON + 2 * MiB, `${endless.pulled()}`)
+  const declared = huge("u1%23b1", MAX_JSON + 1, true)
+  await assert.rejects(declared.onyx.getDoc("u1#b1"), tooLarge)
+  assert.ok(declared.pulled() <= 2 * MiB) // Refused on the declared length.
+
+  // The library feed may be larger, up to its own cap.
+  const library = huge("_changes?", MAX_JSON + MiB)
+  await assert.rejects(library.onyx.library(), /invalid response/) // Read in full: blanks only.
+  const endlessLibrary = huge("_changes?", undefined)
+  await assert.rejects(endlessLibrary.onyx.library(), tooLarge)
+  assert.ok(endlessLibrary.pulled() <= MAX_LIBRARY_JSON + 2 * MiB)
 })
