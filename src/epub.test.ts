@@ -1,12 +1,13 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { closeSync, openSync, readdirSync, readFileSync, statSync, truncateSync } from "node:fs"
+import { appendFileSync, closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { crc32, deflateRawSync } from "node:zlib"
+import { addSummary } from "./input.ts"
 import { bufferSource, decodeXml, EpubError, MAX_BOOK_INFLATE, MAX_CENTRAL_DIRECTORY, MAX_ENTRY, openZip, readPackage, type ByteSource } from "./epub.ts"
-import { addBooks, bookKey, buildIndex, cacheFile, copyToTemp, MAX_ADD_BOOKS, MAX_ADD_FILE, MAX_NOTE, NO_HARD_LINKS, neoRefs, publishCopy, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
+import { addBooks, bookKey, buildIndex, cacheFile, copyToTemp, defaultLibraryDir, libraryFiles, removeSource, MAX_ADD_BOOKS, MAX_ADD_FILE, MAX_NOTE, NO_HARD_LINKS, neoRefs, publishCopy, readChapter, readChapterMap, readMeta, readNote, scanEpubs, within } from "./library.ts"
 
 /** Builds a ZIP in memory: stored or deflated entries, central directory, EOCD. */
 /** `size` / `compressed` override the sizes declared in the central directory (malformed archives). */
@@ -349,42 +350,168 @@ test("documents are decoded by byte order mark or XML declaration: UTF-8 and UTF
   assert.deepEqual(readChapterMap(path, 0).paragraphs, readChapter(path, 0))
 })
 
-test("adding books: a valid file is copied 0600 into a folder created when missing, never twice", async () => {
+async function writeBook(path: string, data: Buffer): Promise<string> {
+  await writeFile(path, data)
+  return path
+}
+
+/** The folders of an add: the library (created by the add), `dir` (absent unless `withDir`) and the cache. */
+async function shelves(withDir = false) {
+  const base = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  const folders = { library: join(base, "data", "library"), dir: join(base, "Books"), cacheDir: join(base, "data", "books") }
+  if (withDir) await mkdir(folders.dir)
+  return folders
+}
+
+test("adding books: a valid file is moved 0600 into the library (0700), never twice; dir is never created", async () => {
   const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
-  const dir = join(await mkdtemp(join(tmpdir(), "opencode-reader-")), "Books", "new")
+  const f = await shelves()
   const source = join(from, "book.epub")
   await writeFile(source, sampleEpub())
-  const first = await addBooks(source, dir)
-  const dest = join(dir, "book.epub")
+  const first = await addBooks(source, f)
+  const dest = join(f.library, "book.epub")
   assert.deepEqual(first, { added: [{ path: dest, key: bookKey({ file: dest }), title: "Le Petit Livre d’essai" }], skipped: [] })
-  assert.ok(readFileSync(dest).equals(readFileSync(source)))
+  assert.ok(readFileSync(dest).equals(sampleEpub()))
+  assert.equal(existsSync(source), false) // Moved.
   assert.equal(statSync(dest).mode & 0o777, 0o600)
-  assert.deepEqual(scanEpubs(dir), [dest])
-  assert.deepEqual(readdirSync(dir), ["book.epub"]) // No temp file left.
+  assert.equal(statSync(f.library).mode & 0o777, 0o700)
+  assert.deepEqual(readdirSync(f.library), ["book.epub"]) // No temp file left.
+  assert.equal(existsSync(f.dir), false) // ~/Books is never created.
 
-  // The same content, under any name, is already there: the copy in the folder is given.
+  // The same content, under any name: not copied again, and its source removed.
   const renamed = join(from, "other name.epub")
   await writeFile(renamed, sampleEpub())
-  const again = await addBooks(renamed, dir)
-  assert.deepEqual(again.added, [])
-  assert.deepEqual(again.skipped, [{ name: "other name.epub", reason: "already there", existing: first.added[0] }])
+  const again = await addBooks(renamed, f)
+  assert.deepEqual(again, { added: [], skipped: [{ name: "other name.epub", reason: `already in the library (removed from ${basename(from)})`, existing: first.added[0] }] })
+  assert.equal(existsSync(renamed), false)
+  assert.deepEqual(readdirSync(f.library), ["book.epub"])
 
   // Another book of the same name gets a suffix; the first copy is untouched.
   const other = join(await mkdtemp(join(tmpdir(), "opencode-reader-from-")), "book.epub")
   await writeFile(other, sampleEpub([], "<p>Another text.</p>"))
-  const suffixed = await addBooks(other, dir)
-  assert.deepEqual(suffixed.added.map((b) => b.path), [join(dir, "book (2).epub")])
-  assert.ok(readFileSync(dest).equals(readFileSync(source)))
-  assert.ok(readFileSync(join(dir, "book (2).epub")).equals(readFileSync(other)))
+  const suffixed = await addBooks(other, f)
+  assert.deepEqual(suffixed.added.map((b) => b.path), [join(f.library, "book (2).epub")])
+  assert.ok(readFileSync(dest).equals(sampleEpub()))
+  assert.ok(readFileSync(join(f.library, "book (2).epub")).equals(sampleEpub([], "<p>Another text.</p>")))
+  assert.equal(existsSync(other), false)
 
-  // A source already in the folder is already there.
-  assert.deepEqual(await addBooks(dest, dir), { added: [], skipped: [{ name: "book.epub", reason: "already there", existing: first.added[0] }] })
-  assert.deepEqual(await addBooks(join(from, "missing.epub"), dir), { added: [], skipped: [{ name: "missing.epub", reason: "not found" }] })
+  assert.deepEqual(await addBooks(join(from, "missing.epub"), f), { added: [], skipped: [{ name: "missing.epub", reason: "not found" }] })
+  assert.equal(existsSync(f.dir), false)
 })
 
-test("adding books: a folder's EPUBs three levels deep; non-EPUB and DRM files are refused", async () => {
+test("adding books: a source in the library, dir or the cache is already there and never touched", async () => {
+  const f = await shelves(true)
+  await mkdir(f.library, { recursive: true })
+  await mkdir(f.cacheDir, { recursive: true })
+  const inLibrary = join(f.library, "a.epub")
+  const inDir = join(f.dir, "b.epub")
+  const inCache = join(f.cacheDir, "c.epub")
+  await writeFile(inLibrary, sampleEpub())
+  await writeFile(inDir, sampleEpub([], "<p>B.</p>"))
+  await writeFile(inCache, sampleEpub([], "<p>C.</p>"))
+  // A link elsewhere to a book of the library is that book.
+  const outside = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const link = join(outside, "link.epub")
+  await symlink(inLibrary, link)
+  for (const [path, existing] of [[inLibrary, inLibrary], [inDir, inDir], [link, inLibrary]] as const) {
+    const result = await addBooks(path, f)
+    assert.deepEqual([result.added, result.skipped.map((s) => [s.reason, s.existing?.path])], [[], [["already there", existing]]], path)
+  }
+  assert.deepEqual(await addBooks(inCache, f), { added: [], skipped: [{ name: "c.epub", reason: "already there" }] })
+  // The library and dir themselves, as folders.
+  assert.deepEqual((await addBooks(f.library, f)).skipped.map((s) => s.reason), ["already there"])
+  assert.deepEqual((await addBooks(f.dir, f)).skipped.map((s) => s.reason), ["already there"])
+  for (const path of [inLibrary, inDir, inCache]) assert.ok(existsSync(path), path)
+  assert.ok(lstatSync(link).isSymbolicLink())
+  assert.deepEqual(readdirSync(f.library), ["a.epub"])
+})
+
+test("adding books: a symbolic link is copied and kept, its target too", async () => {
   const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
-  const dir = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  const f = await shelves()
+  const target = join(from, "real.epub")
+  await writeFile(target, sampleEpub())
+  const link = join(from, "link.epub")
+  await symlink(target, link)
+  const result = await addBooks(link, f)
+  assert.deepEqual(result.added.map((b) => [basename(b.path), b.kept]), [["link.epub", "symbolic link"]])
+  assert.ok(lstatSync(link).isSymbolicLink())
+  assert.ok(readFileSync(target).equals(sampleEpub()))
+  // Its twin through the link: already there, the link kept.
+  const twin = join(from, "twin.epub")
+  await symlink(target, twin)
+  assert.deepEqual((await addBooks(twin, f)).skipped.map((s) => s.reason), ["already there"])
+  assert.ok(lstatSync(twin).isSymbolicLink())
+})
+
+test("adding books: a source changed between the copy and its removal is kept", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const f = await shelves()
+  const touched = join(from, "touched.epub")
+  await writeFile(touched, sampleEpub())
+  // A new modification time just before the last check.
+  const later = await addBooks(touched, f, { beforeRemove: (path) => utimesSync(path, new Date(), new Date(Date.now() + 60_000)) })
+  assert.deepEqual(later.added.map((b) => b.kept), ["changed meanwhile"])
+  assert.ok(existsSync(touched))
+  assert.ok(readFileSync(later.added[0].path).equals(sampleEpub())) // The copy is published all the same.
+
+  // Grown, as a duplicate: kept too.
+  const grown = join(from, "grown.epub")
+  await writeFile(grown, sampleEpub())
+  const dup = await addBooks(grown, f, { beforeRemove: (path) => appendFileSync(path, "x") })
+  assert.deepEqual(dup.skipped.map((s) => s.reason), ["already there"])
+  assert.ok(existsSync(grown))
+
+  // Replaced by another file under the same name.
+  const swapped = join(from, "swapped.epub")
+  await writeFile(swapped, sampleEpub([], "<p>Swapped.</p>"))
+  const swap = await addBooks(swapped, f, {
+    beforeRemove: (path) => {
+      rmSync(path)
+      writeFileSync(path, sampleEpub([], "<p>Swapped.</p>"))
+    },
+  })
+  assert.deepEqual(swap.added.map((b) => b.kept), ["changed meanwhile"])
+  assert.ok(existsSync(swapped))
+})
+
+test("adding books: a removal that fails keeps the original and says so", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const f = await shelves()
+  const source = join(from, "book.epub")
+  await writeFile(source, sampleEpub())
+  const refuse = () => {
+    throw Object.assign(new Error("unlink"), { code: "EACCES" })
+  }
+  const result = await addBooks(source, f, { unlink: refuse })
+  assert.deepEqual(result.added.map((b) => b.kept), ["cannot remove: EACCES"])
+  assert.ok(existsSync(source))
+  assert.equal(addSummary(result), "1 copied; original kept (cannot remove: EACCES)")
+})
+
+test("adding books: a source is removed only when the library copy is the same size and content", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const f = await shelves()
+  await addBooks(await writeBook(join(from, "a.epub"), sampleEpub([], "<p>Aaaa.</p>")), f)
+  // Same size, other content: a new book, not a duplicate.
+  const b = await writeBook(join(from, "b.epub"), sampleEpub([], "<p>Bbbb.</p>"))
+  assert.equal(statSync(b).size, statSync(join(f.library, "a.epub")).size)
+  const result = await addBooks(b, f)
+  assert.deepEqual([result.added.map((x) => basename(x.path)), result.skipped], [["b.epub"], []])
+  assert.ok(readFileSync(join(f.library, "b.epub")).equals(sampleEpub([], "<p>Bbbb.</p>")))
+
+  // The guard itself: a copy that does not hash as the source keeps it.
+  const c = await writeBook(join(from, "c.epub"), sampleEpub([], "<p>Cccc.</p>"))
+  const origin = statSync(c)
+  const copy = join(f.library, "a.epub")
+  assert.equal(removeSource(c, origin, { path: copy, size: statSync(copy).size, hash: "0".repeat(64) }), "copy not verified")
+  assert.equal(removeSource(c, origin, { path: join(f.library, "gone.epub"), size: origin.size, hash: "" }), "copy not verified")
+  assert.ok(existsSync(c))
+})
+
+test("adding books: a folder's EPUBs three levels deep are moved; folders and refused files stay", async () => {
+  const from = await mkdtemp(join(tmpdir(), "opencode-reader-from-"))
+  const f = await shelves()
   await mkdir(join(from, "a", "b", "c"), { recursive: true })
   await writeFile(join(from, "one.epub"), sampleEpub())
   await writeFile(join(from, "a", "b", "two.epub"), sampleEpub([], "<p>Two.</p>"))
@@ -394,21 +521,40 @@ test("adding books: a folder's EPUBs three levels deep; non-EPUB and DRM files a
   await writeFile(join(from, "notes.txt"), "x")
   const drm = sampleEpub([{ name: "META-INF/rights.xml", data: "<rights/>" }])
   await writeFile(join(from, "locked.epub"), drm)
-  const result = await addBooks(from, dir)
-  // one.epub and same.epub are one book: whichever comes first is added.
-  const names = result.added.map((b) => b.path.slice(dir.length + 1)).sort()
+  const result = await addBooks(from, f)
+  // one.epub and same.epub are one book: whichever comes first is moved, the other removed as a duplicate.
+  const names = result.added.map((b) => basename(b.path)).sort()
   const twin = names[0] === "one.epub" ? "same.epub" : "one.epub"
   assert.deepEqual(names, [twin === "one.epub" ? "same.epub" : "one.epub", "two.epub"])
+  const twinFolder = twin === "one.epub" ? basename(from) : "a"
   assert.deepEqual(
     result.skipped.map((s) => `${s.name}: ${s.reason}`).sort(),
-    ["fake.epub: not an EPUB", "locked.epub: protected (DRM)", `${twin}: already there`].sort(),
+    ["fake.epub: not an EPUB", "locked.epub: protected (DRM)", `${twin}: already in the library (removed from ${twinFolder})`].sort(),
   )
-  assert.deepEqual((await addBooks(join(from, "notes.txt"), dir)).skipped, [{ name: "notes.txt", reason: "not an EPUB" }])
-  assert.deepEqual((await addBooks(join(from, "locked.epub"), dir)).skipped, [{ name: "locked.epub", reason: "protected (DRM)" }])
-  // Adding the library folder itself adds nothing.
-  const own = await addBooks(dir, dir)
-  assert.deepEqual([own.added, own.skipped.map((s) => s.reason)], [[], ["already there", "already there"]])
-  assert.deepEqual(readdirSync(dir).sort(), names)
+  assert.ok(result.added.every((b) => !b.kept))
+  // Every folder stays, even emptied; refused and unread files stay.
+  for (const folder of [from, join(from, "a"), join(from, "a", "b"), join(from, "a", "b", "c")]) assert.ok(statSync(folder).isDirectory(), folder)
+  assert.deepEqual(readdirSync(join(from, "a")), ["b"])
+  assert.deepEqual(readdirSync(join(from, "a", "b")), ["c"])
+  assert.deepEqual(readdirSync(from).sort(), ["a", "fake.epub", "locked.epub", "notes.txt"])
+  assert.deepEqual(readdirSync(join(from, "a", "b", "c")), ["deep.epub"])
+  assert.deepEqual(readdirSync(f.library).sort(), names)
+})
+
+test("the library lists the reader's library, then dir when it exists (never created), then cached copies", async () => {
+  const base = await mkdtemp(join(tmpdir(), "opencode-reader-"))
+  const library = defaultLibraryDir(join(base, "data"))
+  assert.equal(library, join(base, "data", "library"))
+  const dir = join(base, "Books")
+  assert.deepEqual(libraryFiles(library, dir, []), [])
+  assert.equal(existsSync(dir), false)
+  assert.equal(existsSync(library), false)
+  await mkdir(library, { recursive: true })
+  await writeFile(join(library, "a.epub"), "x")
+  await mkdir(dir)
+  await writeFile(join(dir, "b.epub"), "x")
+  const cached = join(base, "data", "books", "c.epub")
+  assert.deepEqual(libraryFiles(library, dir, [cached, join(library, "a.epub")]), [join(library, "a.epub"), join(dir, "b.epub"), cached])
 })
 
 test("adding books: a file system without hard links refuses the copy and leaves no temp file", async () => {
@@ -438,7 +584,7 @@ test("adding books: a source over the cap is refused, counted as it is read, and
   const big = join(from, "big.epub")
   await writeFile(big, sampleEpub())
   truncateSync(big, MAX_ADD_FILE + 1)
-  assert.deepEqual(await addBooks(big, dir), { added: [], skipped: [{ name: "big.epub", reason: "too large" }] })
+  assert.deepEqual(await addBooks(big, { ...(await shelves()), library: dir }), { added: [], skipped: [{ name: "big.epub", reason: "too large" }] })
   assert.deepEqual(readdirSync(dir), [])
 
   // A file that grows past the cap after it was checked: the copy stops at the cap.
@@ -468,7 +614,7 @@ test("adding books: a book without a title is named after its source file, not t
       { name: "OEBPS/c1.xhtml", data: chapter("One", "<p>Text.</p>") },
     ]),
   )
-  const result = await addBooks(source, dir)
+  const result = await addBooks(source, { ...(await shelves()), library: dir })
   assert.deepEqual(result.added.map((b) => b.title), ["Untitled Story"])
 })
 
@@ -482,7 +628,7 @@ test("adding books: a folder is read up to the cap, the rest reported, and other
   const timer = setInterval(() => ticks++, 0)
   let result: Awaited<ReturnType<typeof addBooks>>
   try {
-    result = await addBooks(from, dir)
+    result = await addBooks(from, { ...(await shelves()), library: dir })
   } finally {
     clearInterval(timer)
   }

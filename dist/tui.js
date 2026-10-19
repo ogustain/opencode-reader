@@ -29,7 +29,7 @@ import { createElement as _$createElement } from "@opentui/solid";
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
-import { addSummary, cleanPath, commandArgument } from "../src/input.ts";
+import { addSummary, alreadyIn, cleanPath, commandArgument } from "../src/input.ts";
 import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, nextScreen, notesBetween, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
 import { batchSummary, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, syncFailure, UNMAPPED_MESSAGE } from "../src/sync.ts";
@@ -626,16 +626,18 @@ export default Plugin.define({
     };
 
     /**
-     * Copies an EPUB file or a folder's EPUBs into the library (`path`, else
-     * asked), says what happened, and opens the book when there is one: the
-     * one added, or its copy already there.
+     * Moves an EPUB file or a folder's EPUBs into the reader's library (`path`,
+     * else asked), says what happened, and opens the book when there is one:
+     * the one added, or its copy already there.
      */
     const addCommand = async path => {
       if (path === undefined) {
+        const library = (await settings())?.library;
+        const where = library ? ` (${context.ui.format.path(library)})` : "";
         setDialogOpen(true);
         path = await context.ui.dialog.prompt({
           title: "Add books",
-          description: "Path of an EPUB file or a folder (you can drag it into the terminal)",
+          description: `Path of an EPUB file or a folder (you can drag it into the terminal). The file is moved into the reader's library${where}.`,
           placeholder: "~/Downloads/book.epub"
         }).finally(() => setDialogOpen(false));
       }
@@ -646,7 +648,7 @@ export default Plugin.define({
       }).catch(() => undefined);
       if (!result) return toast("Reader server plugin unavailable.", "error");
       const summary = addSummary(result);
-      const refused = result.skipped.some(s => s.reason !== "already there");
+      const refused = result.skipped.some(s => !alreadyIn(s.reason)) || result.added.some(b => b.kept);
       toast(summary || `No EPUB in ${context.ui.format.path(source)}`, !summary ? "warning" : refused ? "warning" : "success");
       const one = result.added.length === 1 ? result.added[0] : result.added.length === 0 && result.skipped.length === 1 ? result.skipped[0].existing : undefined;
       if (one && (await loadBook(one))) openPanel();
@@ -670,7 +672,7 @@ export default Plugin.define({
           value: {
             add: true
           },
-          description: empty ? `No books yet. Add some, or put EPUB files in ${context.ui.format.path(library.dir)}` : `An EPUB file or a folder, copied into ${context.ui.format.path(library.dir)}`,
+          description: empty ? `No books yet. Add an EPUB file or a folder: it is moved into ${context.ui.format.path(library.library)}` : `An EPUB file or a folder, moved into ${context.ui.format.path(library.library)}`,
           category: "Library"
         }, ...(cloud ? [] : [{
           title: "Connect a BOOX…",

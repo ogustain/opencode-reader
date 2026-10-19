@@ -2,15 +2,16 @@
  * Server half of the opencode-reader plugin.
  *
  * Owns every file, device and network access, so the TUI works against a
- * remote server too: lists the local EPUB folder (`dir`, default ~/Books) and
- * the cache of books copied from the Boox, copies the books the reader adds
- * into `dir`, serves book indexes and one chapter at a time, reads the NeoReader library over ADB (read-only, at most once a
+ * remote server too: lists the reader's library (`<dataDir>/library`), the
+ * local EPUB folder (`dir`, default ~/Books, read when it exists) and the cache
+ * of books copied from the Boox, moves the books the reader adds into the
+ * library, serves book indexes and one chapter at a time, reads the NeoReader library over ADB (read-only, at most once a
  * minute, used to copy files), and syncs reading positions with the Onyx cloud
  * (library at most once a minute; one book doc GET per pull, GET + PUT per push).
  * A book file not on this computer is downloaded from the Onyx cloud storage when
  * the Boox uploaded it, else copied over ADB.
  *
- * Options: `dir` (local books), `dataDir` (cache, token, session, backups;
+ * Options: `dir` (your own EPUBs, never created), `dataDir` (library, cache, token, session, backups;
  * default `$XDG_DATA_HOME/opencode-reader`), `adb` (adb binary), `serial`
  * (device serial when several are attached), `server` ("eur" or "us"; else
  * the region saved by `connect` in `<dataDir>/settings.json`), `tokenFile`
@@ -20,8 +21,8 @@ import { Plugin } from "@opencode/plugin"
 import { basename, resolve } from "node:path"
 import { createAdb, type BooxBook } from "./adb.ts"
 import {
-  addBooks, bookKey, buildIndex, cacheFile, defaultCacheDir, expandHome, fileStamp, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs,
-  within, type AddResult, type BookIndex,
+  addBooks, bookKey, buildIndex, cacheFile, defaultCacheDir, defaultLibraryDir, expandHome, fileStamp, libraryFiles, neoRefs, readChapter, readChapterMap,
+  readMeta, readNote, within, type AddResult, type BookIndex,
 } from "./library.ts"
 import type { ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
@@ -60,7 +61,8 @@ export default Plugin.define({
     const dir = resolve(expandHome(typeof ctx.options.dir === "string" && ctx.options.dir ? ctx.options.dir : "~/Books"))
     const dataDir = typeof ctx.options.dataDir === "string" && ctx.options.dataDir ? resolve(expandHome(ctx.options.dataDir)) : defaultDataDir()
     const cacheDir = defaultCacheDir(dataDir)
-    const roots = [dir, cacheDir]
+    const libraryDir = defaultLibraryDir(dataDir)
+    const roots = [libraryDir, dir, cacheDir]
     const adb = createAdb({ bin: ctx.options.adb, serial: ctx.options.serial })
     const tokenFile = typeof ctx.options.tokenFile === "string" && ctx.options.tokenFile ? resolve(expandHome(ctx.options.tokenFile)) : defaultTokenFile(dataDir)
     // The region: the `server` option, else the one saved when connecting (read at each request).
@@ -248,9 +250,9 @@ export default Plugin.define({
     const registration = await ctx.rpc.register(ReaderRpc, {
       library: async () => {
         const manifest = await cacheManifest()
-        const files = [...scanEpubs(dir), ...Object.keys(manifest).filter((file) => within(file, [cacheDir]))]
+        const files = libraryFiles(libraryDir, dir, Object.keys(manifest).filter((file) => within(file, [cacheDir])))
         const books = files.map((path) => entry(path, manifest)).filter((b): b is BookEntry => !!b)
-        return { dir, books }
+        return { dir, library: libraryDir, books }
       },
       boox: async (input) => {
         const refresh = (input as { refresh?: boolean } | undefined)?.refresh === true
@@ -304,7 +306,7 @@ export default Plugin.define({
           return { ok: false, error: message(error) }
         }
       },
-      settings: async () => ({ cloud: onyx.configured(), pushIdleMinutes }),
+      settings: async () => ({ cloud: onyx.configured(), pushIdleMinutes, library: libraryDir }),
       cloud: async (input): Promise<CloudListing> => {
         const refresh = (input as { refresh?: boolean } | undefined)?.refresh === true
         if (refresh && Date.now() - lastCloud >= CLOUD_MIN_INTERVAL_MS) await askCloud()
@@ -390,7 +392,7 @@ export default Plugin.define({
         if (typeof path !== "string" || !path.trim()) return { added: [], skipped: [{ name: "", reason: "no path" }] }
         const source = resolve(expandHome(path.trim()))
         try {
-          return await addLock(() => addBooks(source, dir))
+          return await addLock(() => addBooks(source, { library: libraryDir, dir, cacheDir }))
         } catch (error) {
           return { added: [], skipped: [{ name: basename(source), reason: message(error) }] }
         }

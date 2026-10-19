@@ -26,13 +26,20 @@ test("tokens lose blanks and quotes", () => {
 })
 
 test("the add summary counts each outcome", () => {
-  const book = { path: "", key: "", title: "" }
+  const book: { kept?: string } = {}
   assert.equal(
     addSummary({
       added: [book, book],
       skipped: [{ reason: "already there" }, { reason: "protected (DRM)" }, { reason: "not an EPUB" }, { reason: "not an EPUB" }],
     }),
-    "2 added · 1 already there · 1 refused (DRM) · 2 refused (not an EPUB)",
+    "2 moved to the library · 1 already there · 1 refused (DRM) · 2 refused (not an EPUB)",
+  )
+  assert.equal(
+    addSummary({
+      added: [book, { ...book, kept: "symbolic link" }],
+      skipped: [{ reason: "already in the library (removed from Downloads)" }],
+    }),
+    "1 moved to the library · 1 copied; original kept (symbolic link) · 1 already in the library (removed from Downloads)",
   )
   assert.equal(addSummary({ added: [], skipped: [] }), "")
 })

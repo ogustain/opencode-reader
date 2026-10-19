@@ -36,13 +36,19 @@ export function cleanToken(input: unknown): string {
   return input.trim().replace(/^(["'])(.*)\1$/s, "$2").trim()
 }
 
-/** "2 added · 1 already there · 1 refused (DRM)": one count per outcome, in order of first appearance. */
-export function addSummary(result: { added: unknown[]; skipped: Array<{ reason: string }> }): string {
+/** True for an outcome that refuses nothing: the book is in the library (already, or now). */
+export const alreadyIn = (reason: string) => reason === "already there" || reason.startsWith("already in the library")
+
+/**
+ * "2 moved to the library · 1 already there · 1 refused (DRM)": one count per
+ * outcome, in order of first appearance. A book copied but whose original was
+ * kept says why: "1 copied; original kept (symbolic link)".
+ */
+export function addSummary(result: { added: Array<{ kept?: string }>; skipped: Array<{ reason: string }> }): string {
   const counts = new Map<string, number>()
-  if (result.added.length) counts.set("added", result.added.length)
-  for (const { reason } of result.skipped) {
-    const label = reason === "already there" || reason === "not found" ? reason : `refused (${reason === "protected (DRM)" ? "DRM" : reason})`
-    counts.set(label, (counts.get(label) ?? 0) + 1)
-  }
+  const count = (label: string) => counts.set(label, (counts.get(label) ?? 0) + 1)
+  for (const { kept } of result.added) count(kept ? `copied; original kept (${kept})` : "moved to the library")
+  for (const { reason } of result.skipped)
+    count(alreadyIn(reason) || reason === "not found" ? reason : `refused (${reason === "protected (DRM)" ? "DRM" : reason})`)
   return [...counts].map(([label, n]) => `${n} ${label}`).join(" · ")
 }

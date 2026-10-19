@@ -1,12 +1,16 @@
 /**
- * Books on disk: the local folder, the cache of copies pulled from the Boox,
+ * Books on disk: the reader's library (the books added are moved there), the
+ * local folder, the cache of copies pulled from the Boox,
  * per-book metadata and the chapter index (characters per spine document).
  * One chapter is decoded at a time; nothing keeps a whole book in memory.
  */
 import { createHash, randomBytes } from "node:crypto"
-import { closeSync, constants, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeSync, type Dirent } from "node:fs"
+import {
+  closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, unlinkSync, writeSync,
+  type Dirent, type Stats,
+} from "node:fs"
 import { homedir } from "node:os"
-import { basename, join, posix, relative, resolve, sep } from "node:path"
+import { basename, dirname, join, posix, relative, resolve, sep } from "node:path"
 import { decodeXml, fileSource, openZip, readPackage, resolveHref, type Zip } from "./epub.ts"
 import { mapChapter, type ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
@@ -20,6 +24,17 @@ export function expandHome(path: string): string {
 }
 
 export const defaultCacheDir = (dataDir = defaultDataDir()) => join(dataDir, "books")
+/** The reader's own library: the books added are moved there. */
+export const defaultLibraryDir = (dataDir = defaultDataDir()) => join(dataDir, "library")
+
+/**
+ * The book files listed: the reader's library, then `dir` (when it exists;
+ * never created), then the Boox copies of the cache. A file seen twice is
+ * listed once.
+ */
+export function libraryFiles(libraryDir: string, dir: string, cached: readonly string[]): string[] {
+  return [...new Set([...scanEpubs(libraryDir), ...scanEpubs(dir), ...cached])]
+}
 
 const hash = (value: string) => createHash("sha1").update(value).digest("hex").slice(0, 16)
 
@@ -183,13 +198,22 @@ export function readNote(path: string, href: string): string {
 /** Largest book file added, as for the cloud and ADB copies. */
 export const MAX_ADD_FILE = 512 * 1024 * 1024
 export const ALREADY_THERE = "already there"
+/** A source identical to a book of the library, removed once checked: "already in the library (removed from Downloads)". */
+export const ALREADY_IN_LIBRARY = "already in the library"
 /** Most books read by one add; the others are skipped with `TOO_MANY`. */
 export const MAX_ADD_BOOKS = 500
 export const TOO_MANY = "too many files: add a smaller folder"
 
 export type AddedBook = { path: string; key: string; title: string }
-/** `existing`: the copy already in the folder, for an "already there" book. */
-export type AddResult = { added: AddedBook[]; skipped: Array<{ name: string; reason: string; existing?: AddedBook }> }
+/**
+ * `added`: the books now in the library; `kept`: the original was kept, and
+ * why (else it was moved). `existing`: the copy already in the library or
+ * `dir`, for a book already there.
+ */
+export type AddResult = {
+  added: Array<AddedBook & { kept?: string }>
+  skipped: Array<{ name: string; reason: string; existing?: AddedBook }>
+}
 
 /** The reason shown for a book that does not open. */
 function refusal(error: unknown): string {
@@ -275,18 +299,84 @@ export function copyToTemp(source: number, dir: string, limit = MAX_ADD_FILE): {
   return { temp, size }
 }
 
+/** Flushes a folder's entries (a new link) to disk; skipped where a folder cannot be flushed. */
+function syncDir(dir: string): void {
+  let fd: number
+  try {
+    fd = openSync(dir, "r")
+  } catch {
+    return
+  }
+  try {
+    fsyncSync(fd)
+  } catch {
+    // Some platforms refuse to flush a folder.
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Removing an added book's source: `unlink` and a hook run just before the last check (tests). */
+export type MoveIo = { unlink?: (path: string) => void; beforeRemove?: (path: string) => void }
+
 /**
- * Copies the EPUB at `source`, or the EPUBs of a folder (three levels deep, as
- * `scanEpubs`), into `dir` (created when missing). Each file is read once,
- * into a temp file in `dir`; that copy is what is checked and published, so a
- * source changed meanwhile cannot slip through. A book is added only when it
- * opens as a book does for reading (no DRM, same limits). Nothing is ever
- * overwritten: a book identical to one in `dir` (size and content), or a
- * source already in `dir`, is "already there"; another book of the same
- * name gets a " (2)" suffix. At most `MAX_ADD_BOOKS` files are read; the event
- * loop runs between two books, so other requests are served meanwhile.
+ * Removes `file`, the source of a book now in the library as `copy` (the
+ * copy published, or the identical book found there), only when every check
+ * holds; else keeps it and returns why. `copy` must be a file of `size` bytes
+ * whose content hashes to `hash`, read again here. Then, just before the
+ * unlink, the path `file` must still be a regular file (not a symbolic link)
+ * and the very file read: same device, inode, size, modification and change
+ * times as `origin` (the `fstat` of the descriptor the copy was read from).
+ * Never removes a folder.
  */
-export async function addBooks(source: string, dir: string): Promise<AddResult> {
+export function removeSource(file: string, origin: Stats, copy: { path: string; size: number; hash: string }, io: MoveIo = {}): string | undefined {
+  try {
+    const stat = lstatSync(copy.path)
+    if (!stat.isFile() || stat.size !== copy.size || contentHash(copy.path) !== copy.hash) return "copy not verified"
+  } catch {
+    return "copy not verified"
+  }
+  io.beforeRemove?.(file)
+  let now: Stats
+  try {
+    now = lstatSync(file)
+  } catch {
+    return "changed meanwhile"
+  }
+  if (now.isSymbolicLink()) return "symbolic link"
+  if (!now.isFile()) return "not a file"
+  const same =
+    now.dev === origin.dev && now.ino === origin.ino && now.size === origin.size && now.mtimeMs === origin.mtimeMs && now.ctimeMs === origin.ctimeMs
+  if (!same) return "changed meanwhile"
+  try {
+    ;(io.unlink ?? unlinkSync)(file)
+  } catch (error) {
+    return `cannot remove: ${(error as NodeJS.ErrnoException).code ?? "error"}`
+  }
+  return undefined
+}
+
+/**
+ * Moves the EPUB at `source`, or the EPUBs of a folder (three levels deep, as
+ * `scanEpubs`), into the reader's `library` folder (created 0700 when
+ * missing). `dir` and `cacheDir` are only read, never created.
+ *
+ * Each file is read once, through one descriptor, into a 0600 temp file in
+ * the library; that copy is what is checked (it opens as a book does for
+ * reading: no DRM, same limits), hashed and published under a free name
+ * (never replacing a file). Only then is the source removed, by
+ * `removeSource`, and only when it is a regular file, not a symbolic link,
+ * unchanged since it was read and the published copy verifies; else it is
+ * kept and `kept` says why. Folders are never removed.
+ *
+ * A source inside the library, `dir` or the cache is "already there" and never
+ * touched. A book identical (size, then content) to one of the library or
+ * `dir` is not copied again: its source is removed under the same checks. At
+ * most `MAX_ADD_BOOKS` files are read; the event loop runs between two
+ * books, so other requests are served meanwhile.
+ */
+export async function addBooks(source: string, folders: { library: string; dir: string; cacheDir: string }, io: MoveIo = {}): Promise<AddResult> {
+  const { library, dir, cacheDir } = folders
   const result: AddResult = { added: [], skipped: [] }
   let files: string[]
   try {
@@ -297,7 +387,7 @@ export async function addBooks(source: string, dir: string): Promise<AddResult> 
   }
   for (const file of files.slice(MAX_ADD_BOOKS)) result.skipped.push({ name: basename(file), reason: TOO_MANY })
   files = files.slice(0, MAX_ADD_BOOKS)
-  // Books of `dir` by size (read at the first copy), hashed only when a candidate has the same size.
+  // Books of the library and `dir` by size (read at the first copy), hashed only when a candidate has the same size.
   const bySize = new Map<number, string[]>()
   let scanned = false
   const hashes = new Map<string, string>()
@@ -319,10 +409,23 @@ export async function addBooks(source: string, dir: string): Promise<AddResult> 
       skip("not an EPUB")
       continue
     }
-    if (within(file, [dir])) {
+    // Already a book of the reader: never copied, never removed.
+    const home = [library, dir].find((root) => within(file, [root]))
+    if (home) {
       // Named as the library lists it.
-      const inside = join(dir, relative(realpathSync(dir), realpathSync(file)))
-      skip(ALREADY_THERE, known(inside))
+      skip(ALREADY_THERE, known(join(home, relative(realpathSync(home), realpathSync(file)))))
+      continue
+    }
+    if (within(file, [cacheDir])) {
+      skip(ALREADY_THERE)
+      continue
+    }
+    // The path itself: a symbolic link is copied, never removed.
+    let link: boolean
+    try {
+      link = lstatSync(file).isSymbolicLink()
+    } catch {
+      skip("not found")
       continue
     }
     // One descriptor, the link followed: what is checked is what is read. A FIFO does not block the open.
@@ -333,20 +436,21 @@ export async function addBooks(source: string, dir: string): Promise<AddResult> 
       skip("unreadable")
       continue
     }
+    let origin: Stats
     let copy: { temp: string; size: number }
     try {
-      const stat = fstatSync(fd)
-      if (!stat.isFile()) {
+      origin = fstatSync(fd)
+      if (!origin.isFile()) {
         skip("not an EPUB")
         continue
       }
-      if (stat.size > MAX_ADD_FILE) {
+      if (origin.size > MAX_ADD_FILE) {
         skip("too large")
         continue
       }
       if (!scanned) {
-        mkdirSync(dir, { recursive: true })
-        for (const path of scanEpubs(dir)) {
+        mkdirSync(library, { recursive: true, mode: 0o700 })
+        for (const path of [...scanEpubs(library), ...scanEpubs(dir)]) {
           try {
             const s = statSync(path).size
             bySize.set(s, [...(bySize.get(s) ?? []), path])
@@ -356,7 +460,7 @@ export async function addBooks(source: string, dir: string): Promise<AddResult> 
         }
         scanned = true
       }
-      copy = copyToTemp(fd, dir)
+      copy = copyToTemp(fd, library)
     } catch (error) {
       skip((error as Error).message === "too large" ? "too large" : `copy failed (${(error as NodeJS.ErrnoException).code ?? "error"})`)
       continue
@@ -364,6 +468,12 @@ export async function addBooks(source: string, dir: string): Promise<AddResult> 
       closeSync(fd)
     }
     const { temp, size } = copy
+    /** Removes the source of a book now in the library at `path`; why it was kept otherwise. */
+    const remove = (path: string, hash: string): string | undefined => {
+      if (link) return "symbolic link"
+      if (size !== origin.size) return "changed meanwhile"
+      return removeSource(file, origin, { path, size, hash }, io)
+    }
     try {
       let title: string
       try {
@@ -372,18 +482,21 @@ export async function addBooks(source: string, dir: string): Promise<AddResult> 
         skip(refusal(error))
         continue
       }
-      const same = (bySize.get(size) ?? []).find((path) => hashOf(path) === hashOf(temp))
+      const hash = hashOf(temp)
+      const same = (bySize.get(size) ?? []).find((path) => hashOf(path) === hash)
       if (same) {
-        skip(ALREADY_THERE, known(same))
+        const kept = remove(same, hash)
+        skip(kept ? ALREADY_THERE : `${ALREADY_IN_LIBRARY} (removed from ${basename(dirname(file))})`, known(same))
         continue
       }
       // A hidden name would not be listed.
       const target = name.replace(/^\.+/, "")
-      const dest = publishCopy(temp, dir, /\.epub$/i.test(target) && target.length > 5 ? target : "book.epub")
+      const dest = publishCopy(temp, library, /\.epub$/i.test(target) && target.length > 5 ? target : "book.epub")
+      syncDir(library) // The new name is on disk before the source goes.
       bySize.set(size, [...(bySize.get(size) ?? []), dest])
-      const digest = hashes.get(temp)
-      if (digest) hashes.set(dest, digest)
-      result.added.push({ path: dest, key: bookKey({ file: dest }), title })
+      hashes.set(dest, hash)
+      const kept = remove(dest, hash)
+      result.added.push({ path: dest, key: bookKey({ file: dest }), title, ...(kept ? { kept } : {}) })
     } catch (error) {
       skip((error as Error).message === NO_HARD_LINKS ? NO_HARD_LINKS : `copy failed (${(error as NodeJS.ErrnoException).code ?? "error"})`)
     } finally {
