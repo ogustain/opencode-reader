@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mapChapter } from "./neoposition.ts"
 import {
-  cloudLibrary, cloudReading, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, progressFor, pushQueue, setBackendFields, toLocal, toNeo, withPushedProgress,
+  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, progressFor, pushQueue, setBackendFields, toLocal, toNeo, withPushedProgress, withWrite,
   type NeoRef,
 } from "./sync.ts"
 
@@ -181,7 +181,7 @@ test("pull a newer Boox position, not our own push", () => {
   assert.equal(decidePull({ turnedAt: 20, updateTime: 10, lastAccess: 10, local, cloud }), false)
   assert.equal(decidePull({ turnedAt: 20, updateTime: 10, lastAccess: 30, local, cloud }), true) // Opened on the Boox since.
   assert.equal(decidePull({ turnedAt: 5, updateTime: 10, lastAccess: 0, local: cloud, cloud }), false)
-  assert.equal(decidePull({ turnedAt: 5, updateTime: 10, lastAccess: 8, deviceModel: "OpenCode", pushedAt: 10, local, cloud }), false)
+  assert.equal(decidePull({ turnedAt: 5, updateTime: 10, lastAccess: 8, side: { kind: "ours", turnedAt: 5 }, local, cloud }), false)
   assert.equal(decidePull({ turnedAt: 5, updateTime: 10, lastAccess: 8, local }), false)
 })
 
@@ -204,21 +204,43 @@ test("positions convert through the spine, skipping chapters the plugin does not
   assert.equal(toNeo({ spine: 3, offset: 0 }, refs, map), undefined)
 })
 
-test("our own push is recognised by its device and update time, on both sides", () => {
+test("our own write is recognised by its device, update time and progress, on both sides", () => {
   const local = { spine: 2, offset: 100 }
   // We pushed the reading of t=100; the server stamped it 104 (its clock), while a page turned at 102.
-  const own = { pushedAt: 104, turnedAt: 100 }
-  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, deviceModel: "OpenCode", own, local, cloud: { spine: 2, offset: 50 } }), { push: true })
-  assert.deepEqual(decidePush({ turnedAt: 100, cloudTime: 104, deviceModel: "OpenCode", own, local, cloud: { spine: 2, offset: 50 } }), { push: false, reason: "the Boox is newer" })
-  // The Boox saved since (another device, or another update time): its time counts.
-  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, deviceModel: "Go7", own, local }), { push: false, reason: "the Boox is newer" })
-  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 105, deviceModel: "OpenCode", own, local }), { push: false, reason: "the Boox is newer" })
+  const mark = withWrite(undefined, { pushedAt: 104, turnedAt: 100, progress: "20/100" })
+  const ours = cloudSide({ updateTime: 104, deviceModel: "OpenCode", progress: "20/100" }, mark)
+  assert.deepEqual(ours, { kind: "ours", turnedAt: 100 })
+  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, side: ours, local, cloud: { spine: 2, offset: 50 } }), { push: true })
+  assert.deepEqual(decidePush({ turnedAt: 100, cloudTime: 104, side: ours, local, cloud: { spine: 2, offset: 50 } }), { push: false, reason: "already sent" })
+  // The Boox saved since (another device, update time or progress): its time counts.
+  assert.deepEqual(cloudSide({ updateTime: 104, deviceModel: "Go7", progress: "20/100" }, mark), { kind: "changed" })
+  assert.deepEqual(cloudSide({ updateTime: 105, deviceModel: "OpenCode", progress: "20/100" }, mark), { kind: "changed" })
+  assert.deepEqual(cloudSide({ updateTime: 104, deviceModel: "OpenCode", progress: "30/100" }, mark), { kind: "changed" })
+  assert.deepEqual(cloudSide({ updateTime: 104, deviceModel: "OpenCode" }, undefined), { kind: "changed" })
+  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, side: { kind: "changed" }, local }), { push: false, reason: "the Boox is newer" })
 
   // Reopening: our own write is not pulled back as a Boox position, even if the Boox opened the book since.
   const cloud = { spine: 2, offset: 50 }
-  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 110, deviceModel: "OpenCode", pushedAt: 104, local, cloud }), false)
-  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 0, deviceModel: "Go7", pushedAt: 104, local, cloud }), true)
-  assert.equal(decidePull({ turnedAt: 102, updateTime: 120, lastAccess: 0, deviceModel: "OpenCode", pushedAt: 104, local, cloud }), true)
+  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 110, side: ours, local, cloud }), false)
+  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 0, side: { kind: "changed" }, local, cloud }), true)
+  // Another window's later write (same identity) is pulled by a window holding an older reading.
+  assert.equal(decidePull({ turnedAt: 90, updateTime: 104, lastAccess: 0, side: ours, local, cloud }), true)
+})
+
+test("a PUT accepted but unanswered is still known as ours, from the write recorded before it", () => {
+  const local = { spine: 2, offset: 100 }
+  // Recorded before the PUT: stamped 104, carrying the turn of 100. The answer was lost.
+  let mark = withWrite(undefined, { pushedAt: 90, turnedAt: 80 })
+  mark = withWrite(mark, { pushedAt: 104, turnedAt: 100, progress: "20/100" })
+  const side = cloudSide({ updateTime: 104, deviceModel: "OpenCode", progress: "20/100" }, mark)
+  // A page turned at 102 (local clock behind the server's): pushed, not "the Boox is newer".
+  assert.deepEqual(decidePush({ turnedAt: 102, cloudTime: 104, side, local, cloud: { spine: 2, offset: 50 } }), { push: true })
+  // And the old cloud position never wins a pull against it.
+  assert.equal(decidePull({ turnedAt: 102, updateTime: 104, lastAccess: 0, side, local, cloud: { spine: 2, offset: 50 } }), false)
+  // Only the last writes are kept.
+  for (let i = 0; i < 10; i++) mark = withWrite(mark, { pushedAt: 200 + i, turnedAt: 200 + i })
+  assert.equal(mark.writes!.length, 5)
+  assert.equal(mark.writes![0].pushedAt, 205)
 })
 
 test("pushes run one at a time per book, and the latest waiting snapshot goes next", async () => {

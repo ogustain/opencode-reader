@@ -290,6 +290,7 @@ export default Plugin.define({
       setCloudState("ok")
       // Acknowledge the snapshot that was sent, not whatever was read meanwhile.
       if (result.pushed) acknowledge(key, { turnedAt: s.turnedAt, pushedAt: result.at })
+      else if (result.ack) acknowledge(key, result.ack) // Our write of this reading (or a later one) is already there.
       else if (result.reason === "same position") acknowledge(key, { turnedAt: s.turnedAt, ...(ack?.pushedAt !== undefined ? { pushedAt: ack.pushedAt } : {}) })
     }
     const queuePush = pushQueue<Snapshot>(pushOnce)
@@ -336,8 +337,7 @@ export default Plugin.define({
         turnedAt: readAt(b.key),
         updateTime: c.updateTime,
         lastAccess: c.lastAccess,
-        ...(c.deviceModel ? { deviceModel: c.deviceModel } : {}),
-        ...(ackOf(b.key)?.pushedAt !== undefined ? { pushedAt: ackOf(b.key)!.pushedAt } : {}),
+        ...(c.side ? { side: c.side } : {}),
         local: before,
         cloud: remote,
       }

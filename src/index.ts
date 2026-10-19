@@ -26,13 +26,16 @@ import {
 import type { ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
 import { createFetcher, createLock } from "./sources.ts"
-import { createOnyx, defaultBackupFile, defaultSessionFile, defaultTokenFile, OnyxError, saveBackup, type CloudDoc, type OnyxState } from "./onyx.ts"
+import {
+  createOnyx, defaultBackupFile, defaultSessionFile, defaultSyncFile, defaultTokenFile, OnyxError, readMarks, saveBackup, updateMark, type CloudDoc,
+  type OnyxState,
+} from "./onyx.ts"
 import {
   ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type OpenResult, type PullResult,
   type PushResult,
 } from "./rpc.ts"
 import {
-  cloudLibrary, cloudReading, decidePush, docTotal, parseProgress, patchBookDoc, progressFor, toLocal, toNeo, withPushedProgress,
+  cloudLibrary, cloudReading, cloudSide, decidePush, docTotal, parseProgress, patchBookDoc, progressFor, toLocal, toNeo, withPushedProgress, withWrite,
   type CloudLibrary, type NeoRef, type OwnPush,
 } from "./sync.ts"
 
@@ -170,6 +173,8 @@ export default Plugin.define({
       return map
     }
     const backupFile = defaultBackupFile(dataDir)
+    // Our writes per book doc, recorded before each PUT (see `CloudMark`).
+    const syncFile = defaultSyncFile(dataDir)
     // Book files: the cached copy, else the cloud copy (downloaded beside the file), else ADB.
     const manifestLock = createLock()
     // Pushes of one book doc run one at a time (several windows may push it).
@@ -270,6 +275,7 @@ export default Plugin.define({
           const reading = cloudReading(doc)
           const progress = parseProgress(doc.progress)
           const local = reading.point ? toLocal(reading.point, refsOf(path), (spine) => mapOf(path, spine)) : undefined
+          const side = cloudSide({ ...reading, progress: doc.progress }, readMarks(syncFile)[book.id])
           return {
             ok: true,
             cloud: {
@@ -278,6 +284,7 @@ export default Plugin.define({
               updateTime: reading.updateTime,
               lastAccess: reading.lastAccess,
               ...(reading.deviceModel ? { deviceModel: reading.deviceModel } : {}),
+              side,
             },
           }
         } catch (error) {
@@ -305,16 +312,21 @@ export default Plugin.define({
               const reading = cloudReading(doc)
               const cloudLocal = reading.point ? toLocal(reading.point, bookRefs, (s) => mapOf(path, s)) : undefined
               const total = docTotal(doc)
+              // Our writes: the server's record, and the TUI's last acknowledged one (older versions kept it only there).
+              const mark = readMarks(syncFile)[book.id]
+              const side = cloudSide({ ...reading, progress: doc.progress }, knownPush ? withWrite(mark, knownPush) : mark)
               const decision = decidePush({
                 turnedAt: turnedAt as number,
                 cloudTime: reading.updateTime,
-                ...(reading.deviceModel ? { deviceModel: reading.deviceModel } : {}),
-                ...(knownPush ? { own: knownPush } : {}),
+                side,
                 local,
                 ...(cloudLocal ? { cloud: { spine: cloudLocal.spine, offset: cloudLocal.offset } } : {}),
                 ...(total ? { progress: { local: progressFor(percent as number, total, finished === true), cloud: doc.progress } } : {}),
               })
-              if (!decision.push) return { ok: true, pushed: false, reason: decision.reason }
+              if (!decision.push) {
+                const ack = side.kind === "ours" ? { ack: { pushedAt: reading.updateTime, turnedAt: side.turnedAt } } : {}
+                return { ok: true, pushed: false, reason: decision.reason, ...ack }
+              }
               const fields = toNeo(local, bookRefs, mapOf(path, local.spine))
               if (!fields) return { ok: false, state: "error", error: "unknown chapter" }
               // Same chapter as the cloud: keep the byte range NeoReader computed.
@@ -330,6 +342,8 @@ export default Plugin.define({
                 return { ok: false, state: "error", error }
               }
               saveBackup(backupFile, doc, now)
+              // Recorded first: if the answer to the PUT is lost, the next GET still shows this write as ours.
+              updateMark(syncFile, book.id, (m) => withWrite(m, { pushedAt: now, turnedAt: turnedAt as number, progress: String(patched.progress) }))
               try {
                 await onyx.putDoc(patched as CloudDoc)
                 // The cached listing shows the new %, and hides a book finished here, before the next library read.

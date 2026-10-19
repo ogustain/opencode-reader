@@ -218,7 +218,8 @@ Protocol details for contributors are in
   and in them only the reading position fields (the three position strings,
   `progress`, the update time, `device_model: "OpenCode"` and `updatedAt`).
   Before each write, the record as it was is saved to
-  `<dataDir>/onyx-backups.json` (the last 20, file mode 0600).
+  `<dataDir>/onyx-backups.json` (the last 20, file mode 0600), and the
+  write itself is noted in `<dataDir>/onyx-sync.json` (to recognise it later).
 - **What is never written:** collections, memberships, annotations, notes,
   files in the cloud storage, and anything on the device. Nothing is ever
   deleted. ADB is read-only: it lists the library and copies book files,

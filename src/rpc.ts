@@ -2,7 +2,7 @@ import { Rpc } from "@opencode/plugin/rpc"
 import type { AdbState, BooxBook } from "./adb.ts"
 import type { BookIndex } from "./library.ts"
 import type { OnyxState } from "./onyx.ts"
-import type { CloudBook, CloudCollection } from "./sync.ts"
+import type { CloudBook, CloudCollection, CloudSide, OwnPush } from "./sync.ts"
 import type { Paragraph } from "./text.ts"
 
 /** A readable book on the server's disk (local folder or Boox cache). */
@@ -50,11 +50,14 @@ export type CloudPosition = {
   updateTime: number
   lastAccess: number
   deviceModel?: string
+  /** Whether the cloud holds one of our writes (the server's record of them). */
+  side?: CloudSide
 }
 export type PullResult = { ok: true; cloud: CloudPosition } | { ok: false; state: OnyxState; error: string }
 export type PushResult =
   | { ok: true; pushed: true; at: number }
-  | { ok: true; pushed: false; reason: string }
+  /** `ack`: the cloud already holds our write of this reading (or a later one). */
+  | { ok: true; pushed: false; reason: string; ack?: OwnPush }
   | { ok: false; state: OnyxState; error: string }
 
 const object = { type: "object" } as const

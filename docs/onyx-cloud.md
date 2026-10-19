@@ -132,7 +132,9 @@ What the plugin does, and the only write it ever makes:
    `progress` is `total/total` only for a book finished in the reader;
    otherwise it is the percentage on `total`, clamped to `1..total-1`
    (`0/1` for an unfinished one-page book).
-4. Save the document as it was to the local backup ring (last 20).
+4. Save the document as it was to the local backup ring (last 20), and
+   record the attempted write (update time, `progress`, page-turn time) in
+   `<dataDir>/onyx-sync.json` (last 5 per book).
 5. `PUT {gateway}<uid>%23<docUniqueId>` with the `_rev`. A 409 means the
    document changed meanwhile: retry once from step 1.
 
@@ -142,7 +144,10 @@ nothing: NeoReader keeps its position in private app data and overwrites the
 library row.
 
 Own writes are recognised on the next read by `device_model == "OpenCode"`
-together with the update time the plugin wrote.
+together with the update time and `progress` of a recorded write. Recording
+before the `PUT` means a write whose answer was lost is still known as ours:
+it never wins a pull against a newer page turn here, and it does not block
+the next push as "the BOOX is newer".
 
 ## Book files (OSS)
 

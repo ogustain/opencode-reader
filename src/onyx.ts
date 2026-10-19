@@ -20,7 +20,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto"
 import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { defaultDataDir } from "./paths.ts"
-import { EXPIRED_MESSAGE } from "./sync.ts"
+import { EXPIRED_MESSAGE, type CloudMark } from "./sync.ts"
 
 export type OnyxServer = "eur" | "us"
 export const ENDPOINTS: Record<OnyxServer, { api: string; gateway: string }> = {
@@ -243,6 +243,29 @@ export function saveBackup(file: string, doc: CloudDoc, now: number, keep = BACK
   }
   ring.push({ at: now, id: doc._id, rev: doc._rev, doc })
   writePrivateFile(file, JSON.stringify(ring.slice(-keep)))
+}
+
+export const defaultSyncFile = (dataDir = defaultDataDir()) => join(dataDir, "onyx-sync.json")
+
+/** What the server knows of each book doc (`CloudMark`, by doc id); empty when missing or unreadable. */
+export function readMarks(file: string): Record<string, CloudMark> {
+  try {
+    const value: unknown = JSON.parse(readPrivateFile(file) ?? "{}")
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, CloudMark>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Changes one book's mark and writes the file (atomically, 0600). Synchronous
+ * from read to write, so no other update of this process interleaves.
+ */
+export function updateMark(file: string, id: string, change: (mark: CloudMark | undefined) => CloudMark): CloudMark {
+  const marks = readMarks(file)
+  marks[id] = change(marks[id])
+  writePrivateFile(file, JSON.stringify(marks))
+  return marks[id]
 }
 
 /** Session ids are refreshed this long before they expire. */

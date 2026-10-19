@@ -230,37 +230,65 @@ const same = (a: Local | undefined, b: Local | undefined) => !!a && !!b && a.spi
 /** `device_model` written by a push. */
 export const OWN_DEVICE = "OpenCode"
 
-/** Our last acknowledged push of a book: the cloud update time it wrote and the page-turn time it carried. */
-export type OwnPush = { pushedAt: number; turnedAt: number }
-
-/** The cloud still holds our own push (the server time it wrote, from OpenCode). */
-export function isOwnWrite(cloud: { updateTime: number; deviceModel?: string }, own: { pushedAt?: number } | undefined): boolean {
-  return !!own?.pushedAt && cloud.deviceModel === OWN_DEVICE && cloud.updateTime === own.pushedAt
-}
-
-export type PushDecision = { push: true } | { push: false; reason: "no local reading" | "the Boox is newer" | "same position" }
+/**
+ * One of our writes of a book doc: the update time it stamps (`pushedAt`, the
+ * server's clock), the page-turn time of the reading it carries, and the
+ * `progress` it writes when known.
+ */
+export type OwnPush = { pushedAt: number; turnedAt: number; progress?: string }
 
 /**
- * Push only a position the user reached by turning pages after the last
- * device save, and only a new one: a new position, or the same one with a
+ * What the server keeps per book doc across restarts: `writes`, our last
+ * attempted writes, each recorded before its PUT (so a PUT whose answer was
+ * lost is still known as ours).
+ */
+export type CloudMark = { writes?: OwnPush[] }
+export const WRITES_KEPT = 5
+
+/** The mark with one more attempted write, the oldest dropped. */
+export function withWrite(mark: CloudMark | undefined, write: OwnPush): CloudMark {
+  return { ...mark, writes: [...(mark?.writes ?? []), write].slice(-WRITES_KEPT) }
+}
+
+/**
+ * Who wrote the reading the cloud doc holds. "ours": one of our writes (from
+ * OpenCode, with its update time and progress), so not a Boox reading; its
+ * `turnedAt` is the page-turn time it carried, on the local clock.
+ * "changed": the Boox's (or anyone's), dated by its own clock.
+ */
+export type CloudSide = { kind: "ours"; turnedAt: number } | { kind: "changed" }
+
+export function cloudSide(cloud: { updateTime: number; deviceModel?: string; progress?: unknown }, mark: CloudMark | undefined): CloudSide {
+  if (cloud.deviceModel !== OWN_DEVICE) return { kind: "changed" }
+  const own = [...(mark?.writes ?? [])]
+    .reverse()
+    .find((w) => w.pushedAt === cloud.updateTime && (w.progress === undefined || w.progress === cloud.progress))
+  return own ? { kind: "ours", turnedAt: own.turnedAt } : { kind: "changed" }
+}
+
+export type PushDecision = { push: true } | { push: false; reason: "no local reading" | "the Boox is newer" | "same position" | "already sent" }
+
+/**
+ * Push only a position the user reached by turning pages after the reading
+ * the cloud holds, and only a new one: a new position, or the same one with a
  * new `progress` (the push would write `progress.local`, the cloud holds
  * `progress.cloud`), so finishing or unfinishing on the same screen goes
- * through. When the cloud holds our own push, its update time is the
- * server's clock at that push: compare with the page-turn time that push
- * carried instead.
+ * through. When the cloud holds one of our writes (`side`), compare with the
+ * page-turn time that write carried, not its update time (the server's
+ * clock); a reading no newer than it is "already sent".
  */
 export function decidePush(input: {
   turnedAt?: number
   cloudTime: number
-  deviceModel?: string
-  own?: OwnPush
+  side?: CloudSide
   local: Local
   cloud?: Local
   progress?: { local: string; cloud: unknown }
 }): PushDecision {
   if (!input.turnedAt) return { push: false, reason: "no local reading" }
-  const since = isOwnWrite({ updateTime: input.cloudTime, deviceModel: input.deviceModel }, input.own) ? input.own!.turnedAt : input.cloudTime
-  if (input.turnedAt <= since) return { push: false, reason: "the Boox is newer" }
+  const side = input.side ?? { kind: "changed" }
+  if (side.kind === "ours" && input.turnedAt <= side.turnedAt) return { push: false, reason: "already sent" }
+  if (side.kind === "changed" && input.turnedAt <= input.cloudTime) return { push: false, reason: "the Boox is newer" }
   if (same(input.local, input.cloud) && (!input.progress || sameProgress(input.progress.local, input.progress.cloud)))
     return { push: false, reason: "same position" }
   return { push: true }
@@ -274,22 +302,25 @@ function sameProgress(a: unknown, b: unknown): boolean {
 }
 
 /**
- * Open at the cloud position when the Boox saved or opened the book after the
- * last local page turn, the position differs, and it is not our own push.
+ * Open at the cloud position when it differs and is newer than the local
+ * reading: a Boox reading saved or opened after the last local page turn, or
+ * one of our writes (`side`) carrying a later page turn than the one held
+ * here (another window's). Our own write never wins against a newer local
+ * reading, even when the Boox opened the book since.
  */
 export function decidePull(input: {
   turnedAt?: number
   updateTime: number
   lastAccess: number
-  deviceModel?: string
-  pushedAt?: number
+  side?: CloudSide
   local?: Local
   cloud?: Local
 }): boolean {
-  if (!input.cloud) return false
-  if (isOwnWrite(input, input)) return false
-  if (Math.max(input.updateTime, input.lastAccess) <= (input.turnedAt ?? 0)) return false
-  return !same(input.local, input.cloud)
+  if (!input.cloud || same(input.local, input.cloud)) return false
+  const turnedAt = input.turnedAt ?? 0
+  const side = input.side ?? { kind: "changed" }
+  if (side.kind === "ours") return turnedAt < side.turnedAt
+  return Math.max(input.updateTime, input.lastAccess) > turnedAt
 }
 
 /**
