@@ -176,7 +176,8 @@ Sync applies to books opened through `/books` (books from `dir` are not
 matched with the BOOX library).
 
 - **BOOX → OpenCode.** Opening a book, and opening the panel, read the book's
-  cloud record (at most once a minute per book, never on a timer). When the
+  cloud record (never on a timer; opening the panel at most once a minute per
+  book, opening a book every time). When the
   BOOX saved or opened the book after your last page turn here, the book
   jumps to the BOOX position, to the character, and a toast says so.
 - **OpenCode → BOOX.** Closing the panel, switching books, or

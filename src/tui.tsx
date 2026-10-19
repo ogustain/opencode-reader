@@ -300,7 +300,10 @@ export default Plugin.define({
       }, minutes * 60_000)
     }
 
-    /** Opens at the cloud position when the Boox read the book more recently (once a minute per book at most). */
+    /**
+     * Opens at the cloud position when the Boox read the book more recently:
+     * once a minute per book at most, except when the book is opened (`force`).
+     */
     const lastPull = new Map<string, number>()
     const syncPull = async (b: Book, force = false) => {
       if (!b.booxPath) return
