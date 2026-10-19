@@ -115,9 +115,9 @@ test("an element, a stale xpath, the chapter start and unknown nodes all resolve
 
 test("a note reference in superscript aligns every character, both ways without drift", () => {
   const note = '<sup class="c13"><span class="c14"><a href="../Text/n.html#sdfootnote11sym" id="sdfootnote11anc"><sup>11</sup></a></span></sup>'
-  const map = mapChapter(`<html><body><p><span>Dit Alexéi</span>${note}, puis au XIX<sup>e</sup> siècle.</p></body></html>`)
+  const map = mapChapter(`<html><body><p><span>Dit Marie</span>${note}, puis au XIX<sup>e</sup> siècle.</p></body></html>`)
   const flat = map.paragraphs[0].text
-  assert.equal(flat, "Dit Alexéi¹¹, puis au XIXᵉ siècle.")
+  assert.equal(flat, "Dit Marie¹¹, puis au XIXᵉ siècle.")
   assert.equal(map.count, flat.replace(/\s/g, "").length)
   for (let offset = 0; offset < flat.length; offset++)
     if (flat[offset] !== " ") assert.deepEqual(neoToOffset(map, offsetToNeo(map, offset)), { offset, exact: true }, flat[offset])
