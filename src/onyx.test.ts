@@ -357,3 +357,25 @@ test("a download never replaces a valid copy published meanwhile", async () => {
   assert.ok(readFileSync(dest).equals(published))
   assert.deepEqual(readdirSync(dir), ["book.epub"])
 })
+
+test("every request refuses redirects and has a timeout", async () => {
+  const paths = files()
+  const cloud = fakeCloud({ docs: [{ _id: "u1#b1", modeType: 4 }] })
+  const inits: RequestInit[] = []
+  const spy = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    inits.push(init)
+    return cloud.fetch(input, init)
+  }) as typeof fetch
+  const onyx = createOnyx({ ...paths, fetch: spy, now: () => NOW })
+  await onyx.library()
+  await onyx.putDoc(await onyx.getDoc("u1#b1"))
+  const storage = fakeStorage({ objects: { [KEY]: EPUB } })
+  const spyStorage = (async (input: string | URL | Request, init: RequestInit = {}) => (inits.push(init), storage.fetch(input, init))) as typeof fetch
+  await createOnyx({ ...files(), fetch: spyStorage, now: () => NOW }).downloadBook(bookDoc(), join(cacheDir(), "book.epub"))
+  assert.ok(storage.calls.some((c) => c.url.includes("aliyuncs.com")) && storage.calls.some((c) => c.url.endsWith("config/stss")))
+  assert.ok(inits.length >= 9)
+  for (const init of inits) {
+    assert.equal(init.redirect, "error")
+    assert.ok(init.signal instanceof AbortSignal)
+  }
+})

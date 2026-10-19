@@ -222,9 +222,10 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
   const downloadTimeoutMs = options.downloadTimeoutMs ?? 10 * 60_000
   let session: Session | undefined
 
+  /** Every request has a timeout and refuses redirects: the token, cookie and signature go to the URL asked only. */
   const request = async (url: string, init: RequestInit, timeout = timeoutMs): Promise<Response> => {
     try {
-      return await fetcher(url, { ...init, signal: AbortSignal.timeout(timeout) })
+      return await fetcher(url, { ...init, redirect: "error", signal: AbortSignal.timeout(timeout) })
     } catch {
       throw new OnyxError("offline", "Onyx cloud unreachable")
     }
