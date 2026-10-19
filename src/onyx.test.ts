@@ -608,3 +608,62 @@ test("the server option wins over the region saved in settings.json", async () =
   assert.equal(await hosts(undefined), "push.boox.com")
   assert.equal(await hosts("eur"), "eur.boox.com")
 })
+
+test("a push under way when the BOOX is disconnected sends no PUT and keeps no session", async () => {
+  // Disconnected while the push buys its session (its first await).
+  const paths = files()
+  const cloud = fakeCloud()
+  let onyx: ReturnType<typeof createOnyx>
+  const signals: AbortSignal[] = []
+  const racing = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    if (init.signal) signals.push(init.signal)
+    if (String(input).endsWith("users/syncToken")) disconnectOnyx(onyx, paths)
+    return cloud.fetch(input, init)
+  }) as typeof fetch
+  onyx = createOnyx({ ...paths, fetch: racing, now: () => NOW })
+  const doc = { _id: "u1#b1", _rev: "1-a", modeType: 4, uniqueId: "b1" }
+  await assert.rejects(onyx.putDoc(doc), (e: OnyxError) => e.state === "off" && e.message === "Onyx cloud disconnected")
+  assert.deepEqual(cloud.calls.map((c) => c.method), ["GET"])
+  assert.equal(existsSync(paths.sessionFile), false)
+  assert.ok(signals[0].aborted, "the request in flight is aborted")
+
+  // A saved session: disconnected right after the push starts, before its PUT.
+  const saved = files()
+  const bound = { server: "https://eurcb.boox.com/neocloud/", token_sha: tokenFingerprint(TOKEN) }
+  writeFileSync(saved.sessionFile, JSON.stringify({ cookie_name: "SyncGatewaySession", session_id: "s1", expires: LATER, user_id: "u1", ...bound }))
+  const quiet = fakeCloud()
+  const client = createOnyx({ ...saved, fetch: quiet.fetch, now: () => NOW })
+  const push = client.putDoc(doc)
+  disconnectOnyx(client, saved)
+  await assert.rejects(push, (e: OnyxError) => e.state === "off")
+  assert.equal(quiet.calls.length, 0)
+  assert.equal(existsSync(saved.sessionFile), false)
+
+  // A new token after the disconnect: the client works again.
+  writeFileSync(saved.tokenFile, TOKEN)
+  assert.equal(await client.putDoc(doc), "2-b")
+})
+
+test("a library read or a download under way when the BOOX is disconnected keeps nothing", async () => {
+  const paths = files()
+  const cloud = fakeCloud({ docs: [{ _id: "u1#b1", modeType: 4 }] })
+  let onyx: ReturnType<typeof createOnyx>
+  const racing = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    if (String(input).includes("_changes?")) onyx.reset()
+    return cloud.fetch(input, init)
+  }) as typeof fetch
+  onyx = createOnyx({ ...paths, fetch: racing, now: () => NOW })
+  await assert.rejects(onyx.library(), (e: OnyxError) => e.state === "off")
+  assert.equal(existsSync(paths.sessionFile), false)
+
+  const storage = fakeStorage({ objects: { [KEY]: EPUB } })
+  const dir = cacheDir()
+  let client: ReturnType<typeof createOnyx>
+  const slow = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    if (String(input).includes("aliyuncs.com")) client.reset()
+    return storage.fetch(input, init)
+  }) as typeof fetch
+  client = createOnyx({ ...files(), fetch: slow, now: () => NOW })
+  await assert.rejects(client.downloadBook(bookDoc(), join(dir, "book.epub")), (e: OnyxError) => e.state === "off")
+  assert.deepEqual(readdirSync(dir), [])
+})
