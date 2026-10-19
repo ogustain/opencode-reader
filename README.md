@@ -233,13 +233,18 @@ the sync gateway and its file storage), and only when a token is set.
 
 ```sh
 npm install
+npm run build         # src/tui.tsx → dist/tui.js
 npm run typecheck
 npm test              # node --experimental-strip-types --test (Node 22.6+)
 ```
 
+Run `npm run build` after editing `src/tui.tsx` and commit `dist/tui.js`: an
+installed package gets no Solid JSX transform, so it loads the compiled file
+(a test fails when it is stale).
+
 - `src/index.ts`, the server half: owns files, the device and the network,
   so it also works with a remote OpenCode server.
-- `src/tui.tsx`: picker, panel, sidebar and keys.
+- `src/tui.tsx`: picker, panel, sidebar and keys, compiled to `dist/tui.js`.
 - `src/epub.ts` (ZIP on `node:zlib`, OPF, table of contents), `src/text.ts`
   (XHTML → paragraphs), `src/paginate.ts` (wrapping, pages, position ↔ %),
   `src/adb.ts`, `src/library.ts`, `src/onyx.ts` (cloud client),
