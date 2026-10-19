@@ -183,8 +183,10 @@ matched with the BOOX library).
 - **OpenCode → BOOX.** Closing the panel, switching books, or
   `pushIdleMinutes` without a page turn send the position, but only when your
   last page turn here is newer than the BOOX's last save and the position
-  changed. On the BOOX, open the book and **accept the sync pop-up**:
-  NeoReader jumps to the OpenCode position.
+  changed. A send that failed or was cut short (OpenCode quit meanwhile) is
+  tried again once at the next start or panel opening. On the BOOX, open the
+  book and **accept the sync pop-up**: NeoReader jumps to the OpenCode
+  position.
 - **Who is newer.** The plugin remembers the cloud record's revision at each
   read and write. If the record has not changed since (or holds the
   plugin's own write), any page turned here since wins, whatever the BOOX's

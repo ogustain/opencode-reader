@@ -10,8 +10,10 @@
  * Sync with the Boox, for books copied from it: opening a book or the panel
  * pulls the cloud position when the Boox read it more recently; closing the
  * panel, switching books or `pushIdleMinutes` without a page turn pushes the
- * local position (the server decides, GET then PUT). Without the cloud, or
- * when a push fails, the panel and the sidebar show "Boox: go to N %".
+ * local position (the server decides, GET then PUT). A push stays due in
+ * storage until settled, and is sent again once at the next start or panel
+ * opening. Without the cloud, or when a push fails, the panel and the
+ * sidebar show "Boox: go to N %".
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js"
@@ -24,7 +26,7 @@ import {
   ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type LibraryResult, type OpenResult,
   type PullResult, type PushResult, type SyncSettings,
 } from "./rpc"
-import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pushQueue, type OwnPush, type TreeNode } from "./sync"
+import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles, type OwnPush, type TreeNode } from "./sync"
 import type { Paragraph } from "./text"
 
 const PANEL = "opencode-reader"
@@ -61,6 +63,8 @@ type Saved = {
    * snapshot the cloud acknowledged; `pushedAt`: the update time it wrote.
    */
   cloud?: { state: "sent" | "failed"; at: number; turnedAt?: number; pushedAt?: number }
+  /** Page-turn time of a reading whose push is due and not settled yet: sent again after a restart. */
+  pending?: number
 }
 type Book = { key: string; path: string; title: string; author?: string; booxPath?: string; chapters: number[]; titles: Array<string | undefined> }
 type CloudEntry = CloudListing["books"][number]
@@ -271,11 +275,28 @@ export default Plugin.define({
       setCloud(key, { state: "sent", at: Date.now(), ...ack })
     }
 
+    /** A push of this reading is due: kept in storage until settled, so a lost one is sent again after a restart. */
+    const markPending = (s: Snapshot | undefined) => {
+      if (!s?.book.booxPath || !s.turnedAt || (ackOf(s.book.key)?.turnedAt ?? 0) >= s.turnedAt) return
+      void setStore((draft) => {
+        const saved = draft.books[s.book.key]
+        if (saved && (saved.pending ?? 0) < s.turnedAt) saved.pending = s.turnedAt
+      }).catch(() => {})
+    }
+    /** The reading of `turnedAt` (or an older one) needs no push any more: sent, already there, or not to be sent. */
+    const settle = (key: string, turnedAt: number) => {
+      if (settles(store.books[key]?.pending, turnedAt))
+        void setStore((draft) => {
+          const saved = draft.books[key]
+          if (saved && settles(saved.pending, turnedAt)) delete saved.pending
+        }).catch(() => {})
+    }
+
     /** Sends one snapshot, when it was reached here by turning pages after the Boox's last save. */
     const pushOnce = async (key: string, s: Snapshot) => {
       if (!s.book.booxPath || !s.turnedAt) return
       const ack = ackOf(key)
-      if ((ack?.turnedAt ?? 0) >= s.turnedAt) return // This reading is already in the cloud.
+      if ((ack?.turnedAt ?? 0) >= s.turnedAt) return settle(key, s.turnedAt) // This reading is already in the cloud.
       if (!(await settings())?.cloud) return
       const own = ack?.pushedAt !== undefined && ack.turnedAt !== undefined ? { pushedAt: ack.pushedAt, turnedAt: ack.turnedAt } : undefined
       const result = (await reader
@@ -292,10 +313,27 @@ export default Plugin.define({
       if (result.pushed) acknowledge(key, { turnedAt: s.turnedAt, pushedAt: result.at })
       else if (result.ack) acknowledge(key, result.ack) // Our write of this reading (or a later one) is already there.
       else if (result.reason === "same position") acknowledge(key, { turnedAt: s.turnedAt, ...(ack?.pushedAt !== undefined ? { pushedAt: ack.pushedAt } : {}) })
+      // Sent, already there, or not to be sent ("the Boox is newer"): no longer due. Failures stay due.
+      settle(key, s.turnedAt)
     }
     const queuePush = pushQueue<Snapshot>(pushOnce)
     /** Pushes per book run one at a time; the latest snapshot offered meanwhile goes next. */
-    const syncPush = (s: Snapshot | undefined) => (s?.book.booxPath && s.turnedAt ? queuePush(s.book.key, s) : Promise.resolve())
+    const syncPush = (s: Snapshot | undefined) => {
+      if (!s?.book.booxPath || !s.turnedAt) return Promise.resolve()
+      markPending(s)
+      return queuePush(s.book.key, s)
+    }
+    /** Due pushes left by an earlier session (closed before the answer, or failed): sent once, through the normal decision. */
+    const replayed = new Set<string>()
+    const replayPending = async () => {
+      if (!(await settings())?.cloud) return
+      for (const key of pendingPushes(store.books, replayed)) {
+        replayed.add(key)
+        const s = store.books[key]
+        const entry = { key, path: s.path, title: s.title, booxPath: s.booxPath, chapters: [], titles: [] }
+        void queuePush(key, { book: entry, position: { spine: s.spine, offset: s.offset }, percent: s.percent, finished: s.finished === true, turnedAt: s.updatedAt })
+      }
+    }
     let idleTimer: ReturnType<typeof setTimeout> | undefined
     const scheduleIdlePush = () => {
       if (idleTimer) clearTimeout(idleTimer)
@@ -348,6 +386,7 @@ export default Plugin.define({
       flush()
       acked.set(b.key, {}) // The cloud now holds the Boox's position, not ours.
       setCloud(b.key, undefined)
+      settle(b.key, readAt(b.key))
       toast(`Opened at the Boox position (${pct(percent())}).`, "success")
     }
 
@@ -635,6 +674,7 @@ export default Plugin.define({
         }
         const b = book()
         if (b) void syncPull(b)
+        void replayPending()
       })
 
       const lines = createMemo(() => {
@@ -862,9 +902,15 @@ export default Plugin.define({
     })
     const disposeSidebar = context.ui.slot({ append: "sidebar.content", render: () => <Sidebar /> })
 
+    // Startup: send the pushes an earlier session left due.
+    void replayPending()
+
     return () => {
       if (idleTimer) clearTimeout(idleTimer)
+      // Exiting: the push is not awaited here; it stays due and the next session sends it.
+      const s = snapshot()
       flush()
+      markPending(s)
       disposePanel()
       disposeSidebar()
     }

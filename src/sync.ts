@@ -352,6 +352,24 @@ export function decidePull(input: {
   return Math.max(input.updateTime, input.lastAccess) > turnedAt
 }
 
+/** Whether a due push (`pending`, its page-turn time) is settled by an outcome for the reading of `turnedAt`. */
+export function settles(pending: number | undefined, turnedAt: number): boolean {
+  return pending !== undefined && turnedAt >= pending
+}
+
+/**
+ * Books whose push was due and never settled, to send again once per session:
+ * Boox books with a local reading, not replayed yet (`replayed`).
+ */
+export function pendingPushes(
+  books: Record<string, { pending?: number; booxPath?: string; updatedAt: number }>,
+  replayed: ReadonlySet<string>,
+): string[] {
+  return Object.entries(books)
+    .filter(([key, b]) => b.pending !== undefined && !!b.booxPath && b.updatedAt > 0 && !replayed.has(key))
+    .map(([key]) => key)
+}
+
 /**
  * One push at a time per book. A snapshot offered while that book's push is
  * running waits, replacing any older waiting one, and is sent right after.

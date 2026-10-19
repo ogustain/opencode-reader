@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mapChapter } from "./neoposition.ts"
 import {
-  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, progressFor, pushQueue, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
+  cloudLibrary, cloudReading, cloudSide, decidePull, decidePush, downloadBatch, libraryTree, patchBookDoc, pendingPushes, progressFor, pushQueue, settles, setBackendFields, toLocal, toNeo, withPushedProgress, withSeen, withWrite,
   type NeoRef,
 } from "./sync.ts"
 
@@ -325,4 +325,23 @@ test("a Boox clock ahead does not win when the cloud has not changed since we sa
   // Our own write still wins over a stale "seen" of the same revision.
   const both = withWrite(withSeen(undefined, "9-c", 100), { pushedAt: 50, turnedAt: 400 })
   assert.deepEqual(cloudSide({ updateTime: 50, deviceModel: "OpenCode", rev: "9-c" }, both), { kind: "ours", turnedAt: 400 })
+})
+
+test("a due push stays due until settled, and is replayed once per session", () => {
+  // Due for the reading of 200: an answer for an older snapshot does not settle it.
+  assert.equal(settles(200, 150), false)
+  assert.equal(settles(200, 200), true)
+  assert.equal(settles(200, 250), true)
+  assert.equal(settles(undefined, 250), false)
+  const books = {
+    due: { pending: 200, booxPath: "/Books/a.epub", updatedAt: 200 },
+    sent: { booxPath: "/Books/b.epub", updatedAt: 300 },
+    local: { pending: 100, updatedAt: 100 }, // Not a Boox book.
+    unread: { pending: 100, booxPath: "/Books/c.epub", updatedAt: 0 },
+    other: { pending: 50, booxPath: "/Books/d.epub", updatedAt: 60 },
+  }
+  const replayed = new Set<string>()
+  assert.deepEqual(pendingPushes(books, replayed), ["due", "other"])
+  replayed.add("due").add("other")
+  assert.deepEqual(pendingPushes(books, replayed), [])
 })

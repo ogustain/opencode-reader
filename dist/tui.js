@@ -19,14 +19,16 @@ import { createElement as _$createElement } from "@opentui/solid";
  * Sync with the Boox, for books copied from it: opening a book or the panel
  * pulls the cloud position when the Boox read it more recently; closing the
  * panel, switching books or `pushIdleMinutes` without a page turn pushes the
- * local position (the server decides, GET then PUT). Without the cloud, or
- * when a push fails, the panel and the sidebar show "Boox: go to N %".
+ * local position (the server decides, GET then PUT). A push stays due in
+ * storage until settled, and is sent again once at the next start or panel
+ * opening. Without the cloud, or when a push fails, the panel and the
+ * sidebar show "Boox: go to N %".
  */
 import { Plugin, usePlugin } from "@opencode/plugin/tui";
 import { createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
 import { booxHint, chooseStart, column, contents, defaultDisplay, fromPercent, isFinished, keepsStored, lastScreen, layout, nextChapter, previousScreen, progressOf, savedFinish, savedTimes, screenAt, turnForward } from "../src/paginate.ts";
 import { ReaderRpc } from "../src/rpc.ts";
-import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pushQueue } from "../src/sync.ts";
+import { decidePull, downloadBatch, EXPIRED_MESSAGE, libraryTree, pendingPushes, pushQueue, settles } from "../src/sync.ts";
 const PANEL = "opencode-reader";
 const SIDEBAR_COLUMNS = 37;
 const SAVE_DELAY_MS = 800;
@@ -304,11 +306,27 @@ export default Plugin.define({
       });
     };
 
+    /** A push of this reading is due: kept in storage until settled, so a lost one is sent again after a restart. */
+    const markPending = s => {
+      if (!s?.book.booxPath || !s.turnedAt || (ackOf(s.book.key)?.turnedAt ?? 0) >= s.turnedAt) return;
+      void setStore(draft => {
+        const saved = draft.books[s.book.key];
+        if (saved && (saved.pending ?? 0) < s.turnedAt) saved.pending = s.turnedAt;
+      }).catch(() => {});
+    };
+    /** The reading of `turnedAt` (or an older one) needs no push any more: sent, already there, or not to be sent. */
+    const settle = (key, turnedAt) => {
+      if (settles(store.books[key]?.pending, turnedAt)) void setStore(draft => {
+        const saved = draft.books[key];
+        if (saved && settles(saved.pending, turnedAt)) delete saved.pending;
+      }).catch(() => {});
+    };
+
     /** Sends one snapshot, when it was reached here by turning pages after the Boox's last save. */
     const pushOnce = async (key, s) => {
       if (!s.book.booxPath || !s.turnedAt) return;
       const ack = ackOf(key);
-      if ((ack?.turnedAt ?? 0) >= s.turnedAt) return; // This reading is already in the cloud.
+      if ((ack?.turnedAt ?? 0) >= s.turnedAt) return settle(key, s.turnedAt); // This reading is already in the cloud.
       if (!(await settings())?.cloud) return;
       const own = ack?.pushedAt !== undefined && ack.turnedAt !== undefined ? {
         pushedAt: ack.pushedAt,
@@ -352,10 +370,43 @@ export default Plugin.define({
           pushedAt: ack.pushedAt
         } : {})
       });
+      // Sent, already there, or not to be sent ("the Boox is newer"): no longer due. Failures stay due.
+      settle(key, s.turnedAt);
     };
     const queuePush = pushQueue(pushOnce);
     /** Pushes per book run one at a time; the latest snapshot offered meanwhile goes next. */
-    const syncPush = s => s?.book.booxPath && s.turnedAt ? queuePush(s.book.key, s) : Promise.resolve();
+    const syncPush = s => {
+      if (!s?.book.booxPath || !s.turnedAt) return Promise.resolve();
+      markPending(s);
+      return queuePush(s.book.key, s);
+    };
+    /** Due pushes left by an earlier session (closed before the answer, or failed): sent once, through the normal decision. */
+    const replayed = new Set();
+    const replayPending = async () => {
+      if (!(await settings())?.cloud) return;
+      for (const key of pendingPushes(store.books, replayed)) {
+        replayed.add(key);
+        const s = store.books[key];
+        const entry = {
+          key,
+          path: s.path,
+          title: s.title,
+          booxPath: s.booxPath,
+          chapters: [],
+          titles: []
+        };
+        void queuePush(key, {
+          book: entry,
+          position: {
+            spine: s.spine,
+            offset: s.offset
+          },
+          percent: s.percent,
+          finished: s.finished === true,
+          turnedAt: s.updatedAt
+        });
+      }
+    };
     let idleTimer;
     const scheduleIdlePush = () => {
       if (idleTimer) clearTimeout(idleTimer);
@@ -426,6 +477,7 @@ export default Plugin.define({
       flush();
       acked.set(b.key, {}); // The cloud now holds the Boox's position, not ours.
       setCloud(b.key, undefined);
+      settle(b.key, readAt(b.key));
       toast(`Opened at the Boox position (${pct(percent())}).`, "success");
     };
 
@@ -774,6 +826,7 @@ export default Plugin.define({
         }
         const b = book();
         if (b) void syncPull(b);
+        void replayPending();
       });
       const lines = createMemo(() => {
         const c = chapter();
@@ -1198,9 +1251,15 @@ export default Plugin.define({
       append: "sidebar.content",
       render: () => _$createComponent(Sidebar, {})
     });
+
+    // Startup: send the pushes an earlier session left due.
+    void replayPending();
     return () => {
       if (idleTimer) clearTimeout(idleTimer);
+      // Exiting: the push is not awaited here; it stays due and the next session sends it.
+      const s = snapshot();
       flush();
+      markPending(s);
       disposePanel();
       disposeSidebar();
     };
