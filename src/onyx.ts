@@ -17,8 +17,8 @@
  * Only GET and PUT exist here, and PUT only accepts book docs (modeType 4).
  */
 import { createHash, createHmac, randomBytes } from "node:crypto"
-import { chmodSync, closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { chmodSync, closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
 import { defaultDataDir } from "./paths.ts"
 import { EXPIRED_MESSAGE } from "./sync.ts"
 
@@ -179,23 +179,57 @@ export function makePrivate(file: string): void {
   }
 }
 
+/**
+ * Replaces `file` with `content` in one step: a new 0600 temp file in the same
+ * folder (0700 when created), flushed to disk, then renamed over it. A crash
+ * leaves the old content or the new one, never a mix.
+ */
+export function writePrivateFile(file: string, content: string): void {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+  const temp = join(dirname(file), `.${basename(file)}.${randomBytes(6).toString("hex")}.tmp`)
+  const fd = openSync(temp, "wx", 0o600)
+  try {
+    try {
+      writeSync(fd, content)
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    renameSync(temp, file)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
+}
+
 export const defaultBackupFile = (dataDir = defaultDataDir()) => join(dataDir, "onyx-backups.json")
 export const BACKUPS_KEPT = 20
 
-/** Keeps a doc as it was before a push, in a ring of the last `keep` (0600 JSON file). */
+/**
+ * Keeps a doc as it was before a push, in a ring of the last `keep` (0600 JSON
+ * file). A ring that does not parse is moved aside to `<file>.corrupt-<now>`,
+ * never silently dropped, and a new one starts.
+ */
 export function saveBackup(file: string, doc: CloudDoc, now: number, keep = BACKUPS_KEPT): void {
   let ring: unknown[] = []
+  let text: string | undefined
   try {
-    const old: unknown = JSON.parse(readFileSync(file, "utf8"))
+    text = readFileSync(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  if (text !== undefined) {
+    let old: unknown
+    try {
+      old = JSON.parse(text)
+    } catch {
+      old = undefined
+    }
     if (Array.isArray(old)) ring = old
-  } catch {
-    ring = []
+    else renameSync(file, `${file}.corrupt-${now}`)
   }
   ring.push({ at: now, id: doc._id, rev: doc._rev, doc })
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  makePrivate(file) // Before writing the new content into an existing file.
-  writeFileSync(file, JSON.stringify(ring.slice(-keep)), { mode: 0o600 })
-  makePrivate(file)
+  writePrivateFile(file, JSON.stringify(ring.slice(-keep)))
 }
 
 /** Session ids are refreshed this long before they expire. */
@@ -287,10 +321,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
   const store = (s: Session) => {
     session = s
     try {
-      mkdirSync(dirname(sessionFile), { recursive: true, mode: 0o700 })
-      makePrivate(sessionFile)
-      writeFileSync(sessionFile, JSON.stringify(s), { mode: 0o600 })
-      makePrivate(sessionFile)
+      writePrivateFile(sessionFile, JSON.stringify(s))
     } catch {
       // The in-memory session still works.
     }

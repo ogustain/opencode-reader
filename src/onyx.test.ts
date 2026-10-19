@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  createOnyx, EXPIRED_MESSAGE, MAX_BOOK_FILE, MAX_JSON, MAX_LIBRARY_JSON, OnyxError, ossBookKey, ossBucketOf, ossRequest, ossSignature, ossStringToSign, readToken, saveBackup, tokenFingerprint,
+  createOnyx, EXPIRED_MESSAGE, MAX_BOOK_FILE, MAX_JSON, MAX_LIBRARY_JSON, OnyxError, ossBookKey, ossBucketOf, ossRequest, ossSignature, ossStringToSign, readToken, saveBackup, tokenFingerprint, writePrivateFile,
   type CloudDoc,
 } from "./onyx.ts"
 
@@ -417,4 +417,33 @@ test("JSON replies are read up to a byte cap, and stop there", async () => {
   const endlessLibrary = huge("_changes?", undefined)
   await assert.rejects(endlessLibrary.onyx.library(), tooLarge)
   assert.ok(endlessLibrary.pulled() <= MAX_LIBRARY_JSON + 2 * MiB)
+})
+
+test("private files are replaced whole, 0600, with no temp file left", () => {
+  const dir = join(mkdtempSync(join(tmpdir(), "onyx-")), "data")
+  const file = join(dir, "session")
+  writePrivateFile(file, "one")
+  assert.equal(statSync(dir).mode & 0o777, 0o700)
+  writeFileSync(file, "old", { mode: 0o644 })
+  chmodSync(file, 0o644)
+  writePrivateFile(file, "two")
+  assert.equal(readFileSync(file, "utf8"), "two")
+  assert.equal(statSync(file).mode & 0o777, 0o600) // A new file, not the old 0644 one rewritten.
+  assert.deepEqual(readdirSync(dir), ["session"])
+  // A failed write leaves the old content and no temp file.
+  assert.throws(() => writePrivateFile(join(file, "below"), "x"))
+  assert.deepEqual(readdirSync(dir), ["session"])
+})
+
+test("a corrupt backup ring is moved aside, not dropped", () => {
+  const dir = mkdtempSync(join(tmpdir(), "onyx-"))
+  const file = join(dir, "onyx-backups.json")
+  for (const junk of ['[{"at":1', '{"not":"a ring"}']) {
+    rmSync(dir, { recursive: true, force: true })
+    writePrivateFile(file, junk)
+    saveBackup(file, { _id: "u1#b1", _rev: "2-r", modeType: 4 }, 42)
+    assert.deepEqual(readdirSync(dir).sort(), ["onyx-backups.json", "onyx-backups.json.corrupt-42"])
+    assert.equal(readFileSync(join(dir, "onyx-backups.json.corrupt-42"), "utf8"), junk)
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).map((b: { rev: string }) => b.rev), ["2-r"])
+  }
 })
