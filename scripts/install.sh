@@ -27,8 +27,8 @@ ref=main
 targets=()
 while [ $# -gt 0 ]; do
   case $1 in
-    --link) mode=link ;;
-    --uninstall) mode=uninstall ;;
+    --link) mode="link" ;;
+    --uninstall) mode="uninstall" ;;
     --ref) [ $# -ge 2 ] || die "--ref needs a value"; ref=$2; shift ;;
     --target) [ $# -ge 2 ] || die "--target needs a value"; targets+=("$2"); shift ;;
     -h | --help) usage; exit 0 ;;
