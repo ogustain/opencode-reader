@@ -2,37 +2,38 @@
  * Server half of the opencode-reader plugin.
  *
  * Owns every file, device and network access, so the TUI works against a
- * remote server too: lists the local EPUB folder (`dir`, default ~/Books) and
- * the cache of books copied from the Boox, serves book indexes and one chapter
- * at a time, reads the NeoReader library over ADB (read-only, at most once a
+ * remote server too: lists the reader's library (`<dataDir>/library`), the
+ * local EPUB folder (`dir`, default ~/Books, read when it exists) and the cache
+ * of books copied from the Boox, moves the books the reader adds into the
+ * library, serves book indexes and one chapter at a time, reads the NeoReader library over ADB (read-only, at most once a
  * minute, used to copy files), and syncs reading positions with the Onyx cloud
  * (library at most once a minute; one book doc GET per pull, GET + PUT per push).
  * A book file not on this computer is downloaded from the Onyx cloud storage when
  * the Boox uploaded it, else copied over ADB.
  *
- * Options: `dir` (local books), `dataDir` (cache, token, session, backups;
+ * Options: `dir` (your own EPUBs, never created), `dataDir` (library, cache, token, session, backups;
  * default `$XDG_DATA_HOME/opencode-reader`), `adb` (adb binary), `serial`
- * (device serial when several are attached), `server` ("eur" or "us"),
- * `tokenFile` (Onyx token), `pushIdleMinutes` (push after this long without a
- * page turn).
+ * (device serial when several are attached), `server` ("eur" or "us"; else
+ * the region saved by `connect` in `<dataDir>/settings.json`), `tokenFile`
+ * (Onyx token), `pushIdleMinutes` (push after this long without a page turn).
  */
 import { Plugin } from "@opencode/plugin"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 import { createAdb, type BooxBook } from "./adb.ts"
 import {
-  bookKey, buildIndex, cacheFile, defaultCacheDir, expandHome, fileStamp, neoRefs, readChapter, readChapterMap, readMeta, readNote, scanEpubs,
-  within, type BookIndex,
+  addBooks, bookKey, buildIndex, cacheFile, defaultCacheDir, defaultLibraryDir, expandHome, fileStamp, libraryFiles, neoRefs, readChapter, readChapterMap,
+  readMeta, readNote, within, type AddResult, type BookIndex,
 } from "./library.ts"
 import type { ChapterMap } from "./neoposition.ts"
 import { defaultDataDir } from "./paths.ts"
-import { createFetcher, createLock, liveCopies, type CacheManifest } from "./sources.ts"
+import { createFetcher, createFreshReads, createLock, liveCopies, type CacheManifest } from "./sources.ts"
 import {
-  createOnyx, defaultBackupFile, defaultSessionFile, defaultSyncFile, defaultTokenFile, OnyxError, readMarks, saveBackup, updateMark, type CloudDoc,
-  type OnyxState,
+  connectOnyx, createOnyx, defaultBackupFile, defaultSessionFile, defaultSettingsFile, defaultSyncFile, defaultTokenFile, disconnectOnyx, OnyxError,
+  onyxServer, readMarks, saveBackup, updateMark, type CloudDoc, type OnyxState,
 } from "./onyx.ts"
 import {
-  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type FetchResult, type NoteResult, type OpenResult, type PullResult,
-  type PushResult,
+  ReaderRpc, type BookEntry, type BooxListing, type ChapterResult, type CloudListing, type ConnectResult, type FetchResult, type NoteResult, type OpenResult,
+  type PullResult, type PushResult,
 } from "./rpc.ts"
 import {
   cloudLibrary, pullDoc, pushDoc, toLocal, toNeo, validMark, withBase, withPushedProgress, type CloudLibrary, type DocIo, type LocalReading, type NeoRef,
@@ -60,12 +61,15 @@ export default Plugin.define({
     const dir = resolve(expandHome(typeof ctx.options.dir === "string" && ctx.options.dir ? ctx.options.dir : "~/Books"))
     const dataDir = typeof ctx.options.dataDir === "string" && ctx.options.dataDir ? resolve(expandHome(ctx.options.dataDir)) : defaultDataDir()
     const cacheDir = defaultCacheDir(dataDir)
-    const roots = [dir, cacheDir]
+    const libraryDir = defaultLibraryDir(dataDir)
+    const roots = [libraryDir, dir, cacheDir]
     const adb = createAdb({ bin: ctx.options.adb, serial: ctx.options.serial })
+    const tokenFile = typeof ctx.options.tokenFile === "string" && ctx.options.tokenFile ? resolve(expandHome(ctx.options.tokenFile)) : defaultTokenFile(dataDir)
+    // The region: the `server` option, else the one saved when connecting (read at each request).
+    const settingsFile = defaultSettingsFile(dataDir)
     const onyx = createOnyx({
-      server: ctx.options.server,
-      tokenFile:
-        typeof ctx.options.tokenFile === "string" && ctx.options.tokenFile ? resolve(expandHome(ctx.options.tokenFile)) : defaultTokenFile(dataDir),
+      server: () => onyxServer(ctx.options.server, settingsFile),
+      tokenFile,
       sessionFile: defaultSessionFile(dataDir),
     })
     const idle = Number(ctx.options.pushIdleMinutes)
@@ -153,18 +157,38 @@ export default Plugin.define({
     // Onyx cloud library (books, collections): asked at most once a minute, last result kept.
     let cloud: CloudCache = (await load<CloudCache>("cloud")) ?? { state: "off", message: "Onyx cloud not checked yet", collections: [], books: [] }
     let lastCloud = 0
-    let cloudAsking: Promise<CloudCache> | undefined
-    const askCloud = (): Promise<CloudCache> =>
-      (cloudAsking ??= (async () => {
+    // Listing writes are stored in the order they were made.
+    const cloudSaves = createLock()
+    const saveCloud = () => {
+      const value = cloud
+      return cloudSaves(() => save("cloud", value))
+    }
+    const cloudReads = createFreshReads(
+      async () => {
         lastCloud = Date.now()
         try {
-          cloud = { state: "ok", message: "", checkedAt: Date.now(), ...cloudLibrary(await onyx.library()) }
-          await save("cloud", cloud)
+          return { ok: true as const, library: cloudLibrary(await onyx.library()) }
         } catch (error) {
-          cloud = { ...cloud, state: stateOf(error), message: message(error) }
+          return { ok: false as const, error }
         }
-        return cloud
-      })().finally(() => (cloudAsking = undefined)))
+      },
+      async (read) => {
+        if (!read.ok) {
+          cloud = { ...cloud, state: stateOf(read.error), message: message(read.error) }
+          return
+        }
+        cloud = { state: "ok", message: "", checkedAt: Date.now(), ...read.library }
+        await saveCloud()
+      },
+    )
+    const askCloud = () => cloudReads.ask()
+    /** Another account (or none): its library is read afresh at the next use; a read under way is dropped. */
+    const forgetCloud = () => {
+      cloudReads.forget()
+      lastCloud = 0
+      cloud = { state: "off", message: "Onyx cloud not checked yet", collections: [], books: [] }
+      void saveCloud()
+    }
     /** Doc id of the cloud book at a Boox path; the library is fetched again when it is not known. */
     const cloudBook = async (booxPath: string) => {
       const find = () => cloud.books.find((b) => b.path === booxPath)
@@ -209,6 +233,8 @@ export default Plugin.define({
     // Pushes of one book doc run one at a time (several windows may push it).
     const docLocks = new Map<string, ReturnType<typeof createLock>>()
     const docLock = (id: string) => docLocks.get(id) ?? docLocks.set(id, createLock()).get(id)!
+    // Adds run one at a time: a book added twice at once is copied once.
+    const addLock = createLock()
     const fetchFile = createFetcher({
       cloud: () =>
         onyx.configured()
@@ -224,9 +250,9 @@ export default Plugin.define({
     const registration = await ctx.rpc.register(ReaderRpc, {
       library: async () => {
         const manifest = await cacheManifest()
-        const files = [...scanEpubs(dir), ...Object.keys(manifest).filter((file) => within(file, [cacheDir]))]
+        const files = libraryFiles(libraryDir, dir, Object.keys(manifest).filter((file) => within(file, [cacheDir])))
         const books = files.map((path) => entry(path, manifest)).filter((b): b is BookEntry => !!b)
-        return { dir, books }
+        return { dir, library: libraryDir, books }
       },
       boox: async (input) => {
         const refresh = (input as { refresh?: boolean } | undefined)?.refresh === true
@@ -280,11 +306,11 @@ export default Plugin.define({
           return { ok: false, error: message(error) }
         }
       },
-      settings: async () => ({ cloud: onyx.configured(), pushIdleMinutes }),
+      settings: async () => ({ cloud: onyx.configured(), pushIdleMinutes, library: libraryDir }),
       cloud: async (input): Promise<CloudListing> => {
         const refresh = (input as { refresh?: boolean } | undefined)?.refresh === true
         if (refresh && Date.now() - lastCloud >= CLOUD_MIN_INTERVAL_MS) await askCloud()
-        else if (cloudAsking) await cloudAsking
+        else await cloudReads.pending()
         if (!onyx.configured()) cloud = { ...cloud, state: "off", message: "Onyx cloud not configured (see README)" }
         const manifest = await cacheManifest()
         const cachedBy = new Map(Object.entries(manifest).map(([file, m]) => [`${m.booxPath}:${m.size}`, file]))
@@ -360,6 +386,30 @@ export default Plugin.define({
         } catch (error) {
           return { ok: false, error: message(error) }
         }
+      },
+      add: async (input): Promise<AddResult> => {
+        const path = (input as { path?: unknown } | undefined)?.path
+        if (typeof path !== "string" || !path.trim()) return { added: [], skipped: [{ name: "", reason: "no path" }] }
+        const source = resolve(expandHome(path.trim()))
+        try {
+          return await addLock(() => addBooks(source, { library: libraryDir, dir, cacheDir }))
+        } catch (error) {
+          return { added: [], skipped: [{ name: basename(source), reason: message(error) }] }
+        }
+      },
+      connect: async (input): Promise<ConnectResult> => {
+        const { token, server } = (input ?? {}) as { token?: unknown; server?: unknown }
+        // The `server` option wins over the region chosen: the token is checked where it will be used.
+        const option = ctx.options.server
+        const region = option === undefined ? server : option === "us" ? "us" : "eur"
+        const result = await connectOnyx(onyx, { token, server: region }, { tokenFile, settingsFile })
+        if (result.ok) forgetCloud()
+        return result
+      },
+      disconnect: async () => {
+        const result = disconnectOnyx(onyx, { tokenFile })
+        forgetCloud()
+        return result
       },
     })
 

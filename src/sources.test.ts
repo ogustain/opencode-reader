@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AdbError } from "./adb.ts"
 import { createOnyx, EXPIRED_MESSAGE, OnyxError, publishFile } from "./onyx.ts"
-import { createFetcher, createLock, liveCopies, NOT_HERE, obtainBook } from "./sources.ts"
+import { createFetcher, createFreshReads, createLock, liveCopies, NOT_HERE, obtainBook } from "./sources.ts"
 
 const fail = (error: Error) => async () => {
   throw error
@@ -219,4 +219,40 @@ test("a cached copy deleted or emptied since is no longer announced", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("cloud reads: shared while one runs; a read begun before a disconnect publishes nothing", async () => {
+  const replies: Array<(value: string) => void> = []
+  const published: string[] = []
+  const reads = createFreshReads(
+    () => new Promise<string>((resolve) => replies.push(resolve)),
+    async (value) => void published.push(value),
+  )
+  const first = reads.ask()
+  assert.equal(reads.ask(), first) // Shared.
+  assert.equal(replies.length, 1)
+
+  // Disconnected while the old account's library is read.
+  reads.forget()
+  assert.equal(reads.pending(), undefined)
+  const second = reads.ask()
+  assert.notEqual(second, first)
+  assert.equal(replies.length, 2)
+
+  // The old read ends first: nothing published, and the new read is still the one under way.
+  replies[0]("old account")
+  await first
+  assert.deepEqual(published, [])
+  assert.equal(reads.pending(), second)
+  assert.equal(reads.ask(), second)
+
+  replies[1]("new account")
+  await second
+  assert.deepEqual(published, ["new account"])
+  assert.equal(reads.pending(), undefined)
+
+  // A read that fails clears itself too.
+  const failing = createFreshReads(() => Promise.reject(new Error("down")), async () => {})
+  await assert.rejects(failing.ask(), /down/)
+  assert.equal(failing.pending(), undefined)
 })

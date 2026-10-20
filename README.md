@@ -1,29 +1,25 @@
 # opencode-reader
 
 An [OpenCode](https://opencode.ai) V2 plugin to read EPUB books in a session
-panel while your agents work, and to keep your place in sync with a BOOX
-e-reader (stock NeoReader app) in both directions through the Onyx cloud.
+panel while your agents work. Add your books, and it remembers each one's
+position to the character.
 
-- Opens EPUBs from a local folder, or from your BOOX library (collections
-  included), and remembers each book's position to the character.
-- Picks up where the BOOX left off, and sends your OpenCode position back to
-  the BOOX, on any network.
-- Downloads a book file the BOOX uploaded to the Onyx cloud, or copies it
-  over USB (ADB, read-only) when it is not in the cloud.
-- Works without a BOOX too: it is then a plain EPUB reader.
+- Add an EPUB file or a whole folder with `/add <path>`, or from "Add books…"
+  in `/read` (you can drag the file into the terminal): it is moved into the
+  reader's own library.
+- Text-only reading, with contents, notes and display settings.
+- Optional: keep your place in sync with a BOOX e-reader (stock NeoReader
+  app) in both directions through the Onyx cloud, and open the books of your
+  BOOX library. See [Optional: sync with a BOOX](#optional-sync-with-a-boox).
 
-> **Unofficial.** This project is not affiliated with, endorsed by or
-> supported by Onyx International or BOOX. It talks to an undocumented,
-> reverse-engineered API that may change or break at any time. Read the
-> [Disclaimer](#disclaimer) before giving it your Onyx token.
+> The BOOX sync is **unofficial**: see [the note](#unofficial) and the
+> [Disclaimer](#disclaimer).
 
 ## Requirements
 
 - OpenCode V2 (the plugin uses the V2 plugin API and the session panel).
-- For the BOOX features: a BOOX e-reader using the stock NeoReader app, an
-  Onyx (BOOX) account with the library sync turned on, and optionally
-  [`adb`](https://developer.android.com/tools/adb) for USB copies.
 - EPUB files without DRM.
+- For the BOOX sync only: see [its requirements](#requirements-for-the-boox).
 
 ## Install
 
@@ -40,7 +36,7 @@ options, write the entry as an object in `opencode.json(c)`:
   "plugins": [
     {
       "package": "github:ogustain/opencode-reader",
-      "options": { "dir": "~/ebooks", "server": "us" }
+      "options": { "dir": "~/ebooks" }
     }
   ]
 }
@@ -53,31 +49,47 @@ server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `dir` | `~/Books` | Folder of local EPUB files, searched three levels deep |
-| `dataDir` | `$XDG_DATA_HOME/opencode-reader`, else `~/.local/share/opencode-reader` | Book cache, Onyx token, sync session and push backups |
-| `server` | `"eur"` | Onyx account region: `"eur"` or `"us"` |
+| `dir` | `~/Books` | Extra folder of your own EPUBs, read if it exists (three levels deep); never created or changed |
+| `dataDir` | `$XDG_DATA_HOME/opencode-reader`, else `~/.local/share/opencode-reader` | The reader's library (`library/`, where added books are moved), book cache, settings, Onyx token, sync session and push backups |
+| `server` | the region chosen when connecting (`<dataDir>/settings.json`), else `"eur"` | Onyx account region: `"eur"` or `"us"`; when set, it wins over the one chosen |
 | `tokenFile` | `<dataDir>/onyx-token` | File holding the Onyx token |
 | `pushIdleMinutes` | `5` | Send the position after this many minutes without a page turn |
 | `adb` | `adb` in `PATH`, then common install paths | Path of the `adb` binary |
 | `serial` | none | Device serial when several Android devices are attached |
 
-## Use
+## Read
 
-- `/read` (palette: "Reader: read a book"): pick a book, most recent first,
-  from `dir` and from the books already fetched from the BOOX. It opens at
-  your last position.
-- `/books` (palette: "Reader: Boox library"): your BOOX collections as on the
-  device (collection → sub-collection → book, plus "Not in a collection"),
-  EPUB only, each book with its percentage and last read date. Finished books
-  are hidden behind "Show finished books". `Esc` goes up one level.
-  - Each book says where its file is: "on this computer" (already fetched), "in
-    the cloud" (the BOOX was asked to upload it) or "Boox only".
-  - Choosing a book opens the local copy; without one it downloads the file
-    from the Onyx cloud, else copies it over ADB. With neither, it tells you
-    to upload the file from the BOOX or plug the BOOX in.
-  - "Download all unfinished books" fetches every unfinished book not yet
-    here (cloud first, ADB for the rest) and reports how many it got.
-  - Without an Onyx token, `/books` lists the device library over ADB.
+- `/read` (palette: "Reader: my books"): pick a book, most recent first,
+  from the reader's library, from `dir` and from the books already fetched
+  from the BOOX. It opens at your last position.
+- `/add <path>` (palette: "Reader: add books"): adds that EPUB file or
+  folder. `/add` alone, the palette command and **Add books…** (always first
+  in `/read`) ask for the path: type it, or drag the file or folder into the
+  terminal.
+  - Books are **moved** into the reader's library, `<dataDir>/library`
+    (by default `~/.local/share/opencode-reader/library`; folder 0700, files
+    0600). A single book opens at once; a book already there opens its copy.
+  - A folder adds its EPUBs three levels deep, at most 500 files at a time.
+    Folders are never removed, even once emptied; refused files stay.
+  - A toast sums up: "2 moved to the library · 1 already there · 1 refused
+    (DRM)".
+  - A book is added only if it opens as for reading: not an EPUB, protected
+    (DRM), unreadable or over 512 MiB is refused.
+  - The move is a copy first: the file is read once, the copy is checked,
+    then published under a free name (`name (2).epub` when the name is
+    taken; nothing is ever overwritten). Your file is removed only after
+    that, and only if it is a regular file (not a symbolic link), unchanged
+    since it was read, and the copy in the library has the same size and
+    content. Otherwise it stays, and the toast says "copied; original kept"
+    with the reason.
+  - A book identical (same size and content) to one in the library or in
+    `dir` is not copied again; its file is removed under the same checks:
+    "already in the library (removed from Downloads)".
+  - A file already in the library, `dir` or the BOOX cache is "already
+    there" and never touched.
+  - With no books yet, `/read` shows just "Add books…" (and "Connect a
+    BOOX…"). You can also keep EPUB files in `dir` yourself: they are read
+    in place.
 
 Keys in the panel (click it to focus it):
 
@@ -90,18 +102,14 @@ Keys in the panel (click it to focus it):
 | `f` | Full screen |
 | `q` `Esc` | Close the book |
 
-The status line shows the percentage, chapter and page, and **Sent to Boox**
-once your position reached the cloud. When the cloud cannot carry it, it
-shows **Boox: go to 47 %** instead: use NeoReader's "go to" to jump there.
-The sidebar's **Reading** section shows the open book and its percentage.
+The status line shows the percentage, chapter and page. The sidebar's
+**Reading** section shows the open book and its percentage.
 
 Turning a page forward (`→` or `Space`) onto the book's last screen, or
 pressing it there, finishes the book: 100 %. Opening the book at its end or
 resizing the panel never does; until then the percentage stops at 99 %. A
-finished book is sent to the BOOX as finished (its progress becomes the last
-page, its position stays on that screen), `/books` hides it, and the sidebar
-section goes away until you open an unfinished book. Turning back a page goes
-below 100 % again.
+finished book leaves the sidebar section until you open an unfinished book.
+Turning back a page goes below 100 % again.
 
 Display settings (`s`, saved for all books): text width (80, 100 or 66
 columns, or the full panel), paragraph spacing (blank line, or a first-line
@@ -112,17 +120,86 @@ Resizing the panel or changing a setting re-wraps the text but keeps the
 first words of the screen on the top line: only a page turn or a jump moves
 the position.
 
-## BOOX and Onyx setup
+## Optional: sync with a BOOX
 
-### Library sync and token
+### Unofficial
 
-1. On the BOOX: Library → ⋯ → Library Settings → turn on **Sync Switch**.
-   To keep a book out of the sync: long-press it → **Sync** tab.
-2. Log in to the Onyx web app ([eur.boox.com](https://eur.boox.com) for EU
-   accounts; US accounts use the US site and the option `"server": "us"`).
-   Open the browser developer tools → Application → Local Storage → the site,
-   and copy the value of `token`.
-3. Save it in a file only you can read. Type it at a hidden prompt rather
+> **Unofficial.** This project is not affiliated with, endorsed by or
+> supported by Onyx International or BOOX. It talks to an undocumented,
+> reverse-engineered API that may change or break at any time. Read the
+> [Disclaimer](#disclaimer) before giving it your Onyx token.
+
+With a BOOX, the plugin:
+
+- Opens the books of your BOOX library (collections included).
+- Picks up where the BOOX left off, and sends your OpenCode position back to
+  the BOOX, on any network.
+- Downloads a book file the BOOX uploaded to the Onyx cloud, or copies it
+  over USB (ADB, read-only) when it is not in the cloud.
+
+### Requirements for the BOOX
+
+A BOOX e-reader using the stock NeoReader app, an Onyx (BOOX) account with
+the library sync turned on, and optionally
+[`adb`](https://developer.android.com/tools/adb) for USB copies.
+
+### `/books`
+
+- `/books` (palette: "Reader: BOOX library"): your BOOX collections as on the
+  device (collection → sub-collection → book, plus "Not in a collection"),
+  EPUB only, each book with its percentage and last read date. Finished books
+  are hidden behind "Show finished books". `Esc` goes up one level.
+  - Each book says where its file is: "on this computer" (already fetched), "in
+    the cloud" (the BOOX was asked to upload it) or "Boox only".
+  - Choosing a book opens the local copy; without one it downloads the file
+    from the Onyx cloud, else copies it over ADB. With neither, it tells you
+    to upload the file from the BOOX or plug the BOOX in.
+  - "Download all unfinished books" fetches every unfinished book not yet
+    here (cloud first, ADB for the rest) and reports how many it got.
+  - Without an Onyx token, `/books` lists the device library over ADB. With
+    no BOOX plugged in either, it offers "Connect a BOOX…", and "Use USB
+    (ADB) instead" when `adb` is installed.
+
+With the sync, the status line also shows **Sent to Boox** once your
+position reached the cloud. When the cloud cannot carry it, it shows **Boox:
+go to 47 %** instead (in the sidebar too): use NeoReader's "go to" to jump
+there. A finished book is sent to the BOOX as finished (its progress becomes
+the last page, its position stays on that screen), and `/books` hides it.
+
+### Connect a BOOX
+
+"Connect a BOOX…" is in `/read` (until a BOOX is connected), in `/books`
+when no BOOX is found, and in the palette ("Reader: connect a BOOX"):
+
+1. Choose your account's server: Europe ([eur.boox.com](https://eur.boox.com))
+   or US ([push.boox.com](https://push.boox.com), also for other regions).
+   The `server` option, when set, wins over this choice.
+2. Follow the steps shown to copy your token:
+   - On the BOOX: Library → ⋯ → Library Settings → turn on **Sync Switch**.
+     To keep a book out of the sync: long-press it → **Sync** tab.
+   - Log in to the Onyx web app of your server with the BOOX account. Open
+     the browser developer tools → Application → Local Storage → the site,
+     and copy the value of `token`.
+3. Paste the token. The prompt shows it as you type, so paste it when no one
+   is looking at your screen.
+
+The plugin checks the token with the Onyx cloud first. A refused token is
+never saved; an accepted one is saved to `tokenFile` (0600, replaced in one
+step) with the region in `<dataDir>/settings.json`, and `/books` opens. No
+restart is needed.
+
+"Reader: disconnect the BOOX" (palette, once connected) deletes the token
+file and the sync session, after a confirmation. Your positions, the cached
+books, the backups and the sync records stay.
+
+### Manual token (alternative)
+
+Instead of the guided flow, you can save the token yourself:
+
+1. Turn on the library sync and copy the token as in steps 1 and 2 above
+   (EU accounts use [eur.boox.com](https://eur.boox.com); US accounts use
+   [push.boox.com](https://push.boox.com) and the option `"server": "us"`).
+2. Save it in a file only you can read. Type it at a hidden prompt rather
    than on a command line, which would end up in your shell history:
 
    ```sh
@@ -135,12 +212,14 @@ the position.
    Use `$XDG_DATA_HOME/opencode-reader` or your `dataDir` instead if you set
    one. The `chmod` also covers a file that already existed. The plugin makes
    the token, session and backup files private (0600) whenever it finds them
-   readable by others, and refuses them when they are symbolic links. Quotes
-   copied with the value are ignored.
+   readable by others, and refuses them when they are symbolic links (it
+   never replaces a token file that is a symbolic link either). Quotes copied
+   with the value are ignored.
 
 When the token expires (after about 6 months) the plugin says "Onyx token
-expired: paste a new one (see README)": repeat steps 2 and 3. Without a
-token or a network, the plugin falls back to ADB quietly.
+expired: paste a new one (see README)": connect again ("Reader: connect a
+BOOX"), or repeat the manual steps. Without a token or a network, the plugin
+falls back to ADB quietly.
 
 ### Book files in the cloud
 
@@ -171,10 +250,10 @@ without a token.
 
 The BOOX must be awake and unlocked for ADB to answer.
 
-## How sync works
+### How sync works
 
-Sync applies to books opened through `/books` (books from `dir` are not
-matched with the BOOX library).
+Sync applies to books opened through `/books` (added books and books from
+`dir` are not matched with the BOOX library).
 
 - **Automatic when certain, asked otherwise.** If only the BOOX read since
   the last agreement, opening the book or the panel jumps to its position;
@@ -256,7 +335,8 @@ prepares git installs by running a full `npm install`, which fails.
 - `src/tui.tsx`: picker, panel, sidebar and keys, compiled to `dist/tui.js`.
 - `src/epub.ts` (ZIP on `node:zlib`, OPF, table of contents), `src/text.ts`
   (XHTML → paragraphs, note references and texts), `src/paginate.ts` (wrapping, pages, position ↔ %),
-  `src/adb.ts`, `src/library.ts`, `src/onyx.ts` (cloud client),
+  `src/adb.ts`, `src/library.ts` (also adds books), `src/input.ts` (typed
+  paths and tokens), `src/onyx.ts` (cloud client, connect and disconnect),
   `src/sources.ts` (cloud then ADB), `src/neoposition.ts` (NeoReader
   positions), `src/sync.ts` (collection tree, pull/push decisions).
 

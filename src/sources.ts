@@ -120,3 +120,34 @@ export function createLock(): <T>(task: () => Promise<T>) => Promise<T> {
     return run
   }
 }
+
+/**
+ * Reads shared while one runs, for a result that `forget` makes stale (the
+ * cloud library of an account just disconnected): a read begun before
+ * `forget` never reaches `publish`, and the next `ask` starts a new read
+ * rather than wait for it.
+ */
+export function createFreshReads<T>(read: () => Promise<T>, publish: (result: T) => Promise<void>) {
+  let generation = 0
+  let running: Promise<void> | undefined
+  return {
+    ask(): Promise<void> {
+      if (running) return running
+      const at = generation
+      const job: Promise<void> = read()
+        .then((result) => (at === generation ? publish(result) : undefined))
+        .finally(() => {
+          // A newer read may run meanwhile: only this one is cleared.
+          if (running === job) running = undefined
+        })
+      running = job
+      return job
+    },
+    /** The read under way, if any. */
+    pending: (): Promise<void> | undefined => running,
+    forget() {
+      generation++
+      running = undefined
+    },
+  }
+}

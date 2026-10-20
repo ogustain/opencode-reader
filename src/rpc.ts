@@ -15,7 +15,9 @@ export type BookEntry = {
   booxPath?: string
 }
 
-export type LibraryResult = { dir: string; books: BookEntry[] }
+/** `library`: the reader's own folder, where added books are moved; `dir`: the user's folder, read when it exists. */
+export type LibraryResult = { dir: string; library: string; books: BookEntry[] }
+export type { AddResult } from "./library.ts"
 export type BooxListing = {
   state: AdbState
   message: string
@@ -31,7 +33,10 @@ export type OpenResult = ({ ok: true } & BookIndex) | { ok: false; error: string
 export type ChapterResult = { ok: true; paragraphs: Paragraph[] } | { ok: false; error: string }
 export type NoteResult = { ok: true; text: string } | { ok: false; error: string }
 
-export type SyncSettings = { cloud: boolean; pushIdleMinutes: number }
+/** `library`: where added books are moved. */
+export type SyncSettings = { cloud: boolean; pushIdleMinutes: number; library: string }
+/** `error` never carries the token. */
+export type ConnectResult = { ok: true } | { ok: false; error: string }
 /** The Onyx cloud library (last known when `state` is not "ok"). */
 export type CloudListing = {
   state: OnyxState
@@ -95,6 +100,12 @@ export const ReaderRpc = Rpc.define({
     agree: { input: object, output: object },
     /** { path, booxPath, spine, offset, percent, finished, turnedAt, force? } → PushResult (GET, then PUT of the book doc; `force`: the `_rev` the reader chose over) */
     push: { input: object, output: object },
+    /** { path } → AddResult (an EPUB file, or a folder's EPUBs, moved into the reader's library) */
+    add: { input: object, output: object },
+    /** { token, server: "eur" | "us" } → ConnectResult (the token is checked with the Onyx cloud before it is saved) */
+    connect: { input: object, output: object },
+    /** {} → ConnectResult (deletes the token and the sync session; backups, sync records and books stay) */
+    disconnect: { input: object, output: object },
   },
   events: {},
 })

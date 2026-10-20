@@ -17,8 +17,9 @@
  * Only GET and PUT exist here, and PUT only accepts book docs (modeType 4).
  */
 import { createHash, createHmac, randomBytes } from "node:crypto"
-import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs"
+import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
+import { cleanToken } from "./input.ts"
 import { defaultDataDir } from "./paths.ts"
 import { EXPIRED_MESSAGE, type CloudMark } from "./sync.ts"
 
@@ -63,6 +64,7 @@ export type CloudDoc = Record<string, unknown> & { _id: string; _rev?: string; m
 type Fetch = typeof fetch
 
 export type OnyxOptions = {
+  /** "eur" (default) or "us", or a function giving it, read at each request (a new region needs no restart). */
   server?: unknown
   tokenFile?: string
   sessionFile?: string
@@ -88,6 +90,14 @@ export type Onyx = {
    * byte count; "missing" when the cloud has no file.
    */
   downloadBook(doc: CloudDoc, dest: string, size?: number): Promise<number>
+  /** Buys a session with `token` on `server` (not the token file), and forgets it: throws as a session request does. */
+  verify(token: string, server: OnyxServer): Promise<void>
+  /**
+   * Forgets the session (memory and file), the storage credentials and bucket:
+   * the next request starts afresh. Operations under way stop at their next
+   * step with "off" (in-flight requests are aborted) and keep nothing.
+   */
+  reset(): void
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +322,8 @@ export function readToken(file: string): string | undefined {
 export const tokenFingerprint = (token: string) => createHash("sha256").update(token).digest("hex").slice(0, 16)
 
 export function createOnyx(options: OnyxOptions = {}): Onyx {
-  const endpoints = ENDPOINTS[options.server === "us" ? "us" : "eur"]
+  const server = options.server
+  const endpoints = () => ENDPOINTS[(typeof server === "function" ? server() : server) === "us" ? "us" : "eur"]
   const tokenFile = options.tokenFile ?? defaultTokenFile()
   const sessionFile = options.sessionFile ?? defaultSessionFile()
   const fetcher: Fetch = options.fetch ?? fetch
@@ -321,16 +332,36 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
   const downloadTimeoutMs = options.downloadTimeoutMs ?? 10 * 60_000
   let session: Session | undefined
 
+  /**
+   * Each `reset` starts a new epoch and aborts the requests of the last one.
+   * An operation keeps the epoch it started in (`at`) and checks it after each
+   * await, before any request and before keeping a session or credentials: an
+   * operation begun before a disconnect sends nothing more and keeps nothing.
+   * `at` undefined: not bound to an epoch (`verify`).
+   */
+  let epoch = 0
+  let aborter = new AbortController()
+  const guard = (at: number | undefined) => {
+    if (at !== undefined && at !== epoch) throw new OnyxError("off", "Onyx cloud disconnected")
+  }
+
   /** Every request has a timeout and refuses redirects: the token, cookie and signature go to the URL asked only. */
-  const request = async (url: string, init: RequestInit, timeout = timeoutMs): Promise<Response> => {
+  const request = async (url: string, init: RequestInit, at: number | undefined, timeout = timeoutMs): Promise<Response> => {
+    guard(at)
+    const signal = at === undefined ? AbortSignal.timeout(timeout) : AbortSignal.any([AbortSignal.timeout(timeout), aborter.signal])
+    let response: Response
     try {
-      return await fetcher(url, { ...init, redirect: "error", signal: AbortSignal.timeout(timeout) })
+      response = await fetcher(url, { ...init, redirect: "error", signal })
     } catch {
+      guard(at)
       throw new OnyxError("offline", "Onyx cloud unreachable")
     }
+    if (at !== undefined && at !== epoch) void response.body?.cancel().catch(() => {})
+    guard(at)
+    return response
   }
   /** Reads a JSON body of at most `max` bytes, stopping as soon as it is over. */
-  const json = async (response: Response, max = MAX_JSON): Promise<unknown> => {
+  const json = async (response: Response, at: number | undefined, max = MAX_JSON): Promise<unknown> => {
     const tooLarge = () => new OnyxError("error", "Onyx cloud: response too large")
     if (Number(response.headers.get("content-length") ?? 0) > max) {
       void response.body?.cancel().catch(() => {})
@@ -345,8 +376,11 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       try {
         chunk = await reader.read()
       } catch {
+        guard(at)
         throw new OnyxError("offline", "Onyx cloud unreachable")
       }
+      if (at !== undefined && at !== epoch) void reader.cancel().catch(() => {})
+      guard(at)
       if (chunk.done) break
       total += chunk.value.length
       if (total > max) {
@@ -367,7 +401,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     !!s &&
     typeof s.session_id === "string" &&
     typeof s.cookie_name === "string" &&
-    s.server === endpoints.gateway &&
+    s.server === endpoints().gateway &&
     s.token_sha === tokenFingerprint(token) &&
     Date.parse(s.expires) - now() > MARGIN_MS
   /** Forgets the session in memory and on disk. */
@@ -380,7 +414,8 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     }
   }
 
-  const store = (s: Session) => {
+  const store = (s: Session, at: number) => {
+    guard(at)
     session = s
     try {
       writePrivateFile(sessionFile, JSON.stringify(s))
@@ -389,13 +424,12 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     }
   }
 
-  const newSession = async (): Promise<Session> => {
-    const token = readToken(tokenFile)
+  const newSession = async (at: number | undefined, token = readToken(tokenFile), ends = endpoints()): Promise<Session> => {
     if (!token) throw new OnyxError("off", "Onyx cloud not configured (see README)")
-    const response = await request(`${endpoints.api}users/syncToken`, { headers: { Authorization: `Bearer ${token}` } })
+    const response = await request(`${ends.api}users/syncToken`, { headers: { Authorization: `Bearer ${token}` } }, at)
     if (response.status === 401 || response.status === 403) throw new OnyxError("expired", EXPIRED_MESSAGE)
     if (!response.ok) throw new OnyxError("error", `Onyx cloud: HTTP ${response.status}`)
-    const body = (await json(response)) as { result_code?: number; data?: Partial<Session> }
+    const body = (await json(response, at)) as { result_code?: number; data?: Partial<Session> }
     const data = body?.data
     if (body?.result_code !== 0 || !data || typeof data.session_id !== "string" || typeof data.cookie_name !== "string")
       throw new OnyxError("expired", EXPIRED_MESSAGE)
@@ -404,12 +438,13 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       session_id: data.session_id,
       expires: String(data.expires ?? ""),
       channels: data.channels,
-      server: endpoints.gateway,
+      server: ends.gateway,
       token_sha: tokenFingerprint(token),
     }
   }
 
-  const current = async (): Promise<Session> => {
+  const current = async (at: number): Promise<Session> => {
+    guard(at)
     const token = readToken(tokenFile)
     if (!token) {
       forget()
@@ -424,48 +459,49 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       // No usable saved session.
     }
     forget()
-    const s = await newSession()
-    store(s)
+    const s = await newSession(at)
+    store(s, at)
     return s
   }
 
   /** Gateway request with the session cookie; a 401 renews the session once. */
-  const gateway = async (path: string, init: RequestInit = {}, timeout?: number): Promise<Response> => {
+  const gateway = async (at: number, path: string, init: RequestInit = {}, timeout?: number): Promise<Response> => {
     for (let attempt = 0; ; attempt++) {
-      const s = await current()
+      const s = await current(at)
       const headers = { ...(init.headers as Record<string, string> | undefined), Cookie: `${s.cookie_name}=${s.session_id}` }
-      const response = await request(endpoints.gateway + path, { ...init, headers }, timeout)
+      const response = await request(endpoints().gateway + path, { ...init, headers }, at, timeout)
       if (response.status !== 401 || attempt > 0) return response
       session = undefined
-      store(await newSession())
+      store(await newSession(at), at)
     }
   }
 
-  const ok = async (response: Response, max?: number): Promise<unknown> => {
+  const ok = async (response: Response, at: number, max?: number): Promise<unknown> => {
     if (response.status === 401) throw new OnyxError("expired", EXPIRED_MESSAGE)
     if (response.status === 409) throw new OnyxError("conflict", "Onyx cloud: the book changed meanwhile")
     if (!response.ok) throw new OnyxError("error", `Onyx cloud: HTTP ${response.status}`)
-    return json(response, max)
+    return json(response, at, max)
   }
 
-  const userId = async (): Promise<string> => {
-    const s = await current()
+  const userId = async (at: number): Promise<string> => {
+    const s = await current(at)
     if (s.user_id) return s.user_id
-    const body = (await ok(await gateway("_session"))) as { userCtx?: { name?: unknown } }
+    const body = (await ok(await gateway(at, "_session"), at)) as { userCtx?: { name?: unknown } }
     const name = body?.userCtx?.name
     if (typeof name !== "string" || !name) throw new OnyxError("expired", EXPIRED_MESSAGE)
-    store({ ...(session ?? s), user_id: name })
+    store({ ...(session ?? s), user_id: name }, at)
     return name
   }
 
   /** Authenticated API GET (Bearer token); the token's refusal is "expired". */
-  const api = async (path: string): Promise<unknown> => {
+  const api = async (at: number, path: string): Promise<unknown> => {
+    guard(at)
     const token = readToken(tokenFile)
     if (!token) throw new OnyxError("off", "Onyx cloud not configured (see README)")
-    const response = await request(`${endpoints.api}${path}`, { headers: { Authorization: `Bearer ${token}` } })
+    const response = await request(`${endpoints().api}${path}`, { headers: { Authorization: `Bearer ${token}` } }, at)
     if (response.status === 401 || response.status === 403) throw new OnyxError("expired", EXPIRED_MESSAGE)
     if (!response.ok) throw new OnyxError("error", `Onyx cloud: HTTP ${response.status}`)
-    const body = (await json(response)) as { result_code?: number; data?: unknown }
+    const body = (await json(response, at)) as { result_code?: number; data?: unknown }
     if (body?.result_code !== 0) throw new OnyxError("error", "Onyx cloud: request refused")
     return body.data
   }
@@ -473,11 +509,12 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
   // STS credentials and the bucket: memory only, credentials until a minute before they expire.
   let sts: { credentials: StsCredentials; until: number; token: string } | undefined
   let bucket: OssBucket | undefined
-  const credentials = async (): Promise<StsCredentials> => {
+  const credentials = async (at: number): Promise<StsCredentials> => {
     const fingerprint = tokenFingerprint(readToken(tokenFile) ?? "")
     if (sts && sts.token === fingerprint && now() < sts.until) return sts.credentials
     sts = undefined
-    const data = (await api("config/stss")) as Partial<StsCredentials> | undefined
+    const data = (await api(at, "config/stss")) as Partial<StsCredentials> | undefined
+    guard(at)
     const fields = ["AccessKeyId", "AccessKeySecret", "SecurityToken", "Expiration"] as const
     if (!data || !fields.every((f) => typeof data[f] === "string" && data[f])) throw new OnyxError("error", "Onyx cloud: invalid storage credentials")
     const value = data as StsCredentials
@@ -486,15 +523,17 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     sts = { credentials: { AccessKeyId: value.AccessKeyId, AccessKeySecret: value.AccessKeySecret, SecurityToken: value.SecurityToken, Expiration: value.Expiration }, until, token: fingerprint }
     return sts.credentials
   }
-  const ossBucket = async (): Promise<OssBucket> => {
+  const ossBucket = async (at: number): Promise<OssBucket> => {
     if (bucket) return bucket
-    const found = ossBucketOf(await api("config/buckets"))
+    const found = ossBucketOf(await api(at, "config/buckets"))
+    guard(at)
     if (!found) throw new OnyxError("error", "Onyx cloud: no file storage")
     return (bucket = found)
   }
 
   const downloadBook = async (doc: CloudDoc, dest: string, size = 0): Promise<number> => {
-    const uid = await userId()
+    const at = epoch
+    const uid = await userId(at)
     const uniqueId = String(doc.uniqueId)
     if (doc.modeType !== 4 || doc.type !== "epub" || doc._id !== `${uid}#${uniqueId}`) throw new OnyxError("error", "not an EPUB book document")
     const key = ossBookKey(uid, uniqueId, "epub")
@@ -502,8 +541,8 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
     const origin = typeof doc.fileOriginSize === "number" && doc.fileOriginSize > 0 ? doc.fileOriginSize : undefined
     const expected = origin ?? (size > 0 ? size : undefined)
     if ((origin && size > 0 && origin !== size) || (expected ?? 0) > MAX_BOOK_FILE) throw new OnyxError("error", "the cloud file is not the Boox file")
-    const { url, headers } = ossRequest("GET", await credentials(), await ossBucket(), key, new Date(now()))
-    const response = await request(url, { headers }, downloadTimeoutMs)
+    const { url, headers } = ossRequest("GET", await credentials(at), await ossBucket(at), key, new Date(now()))
+    const response = await request(url, { headers }, at, downloadTimeoutMs)
     if (response.status === 403 || response.status === 404) {
       void response.body?.cancel().catch(() => {})
       // 403 may also be credentials gone stale early: get new ones next time.
@@ -537,8 +576,11 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
         try {
           chunk = await reader.read()
         } catch {
+          guard(at)
           throw new OnyxError("offline", "Onyx cloud download interrupted")
         }
+        if (at !== epoch) void reader.cancel().catch(() => {})
+        guard(at)
         if (chunk.done) break
         total += chunk.value.length
         if (total > (expected ?? MAX_BOOK_FILE)) {
@@ -551,6 +593,7 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
       close()
       if (expected !== undefined && total !== expected) throw new OnyxError("error", `incomplete download (${total} of ${expected} bytes)`)
       if (head.toString("latin1") !== "PK") throw new OnyxError("error", "the cloud file is not an EPUB")
+      guard(at)
       publishFile(partial, dest, total)
       return total
     } catch (error) {
@@ -571,33 +614,153 @@ export function createOnyx(options: OnyxOptions = {}): Onyx {
         return true // A refused token file: requests say why.
       }
     },
-    userId,
+    userId: () => userId(epoch),
     downloadBook,
+    async verify(token, server) {
+      await newSession(undefined, token, ENDPOINTS[server])
+    },
+    reset() {
+      epoch++
+      aborter.abort()
+      aborter = new AbortController()
+      forget()
+      sts = undefined
+      bucket = undefined
+    },
     async library() {
-      const uid = await userId()
+      const at = epoch
+      const uid = await userId(at)
       const query = `filter=sync_gateway/bychannel&channels=${encodeURIComponent(`${uid}-READER_LIBRARY`)}&include_docs=true`
-      const body = (await ok(await gateway(`_changes?${query}`, {}, 60_000), MAX_LIBRARY_JSON)) as { results?: Array<{ doc?: CloudDoc; deleted?: boolean; removed?: unknown }> }
+      const body = (await ok(await gateway(at, `_changes?${query}`, {}, 60_000), at, MAX_LIBRARY_JSON)) as { results?: Array<{ doc?: CloudDoc; deleted?: boolean; removed?: unknown }> }
       if (!Array.isArray(body?.results)) throw new OnyxError("error", "Onyx cloud: invalid library")
       return body.results
         .filter((r) => !r.deleted && !r.removed && r.doc && !r.doc._deleted && typeof r.doc._id === "string")
         .map((r) => r.doc!)
     },
     async getDoc(id) {
-      const doc = (await ok(await gateway(encodeURIComponent(id)))) as CloudDoc
+      const at = epoch
+      const doc = (await ok(await gateway(at, encodeURIComponent(id)), at)) as CloudDoc
       if (!doc || doc._id !== id) throw new OnyxError("error", "Onyx cloud: invalid document")
       return doc
     },
     async putDoc(doc) {
-      const uid = await userId()
+      const at = epoch
+      const uid = await userId(at)
       if (doc.modeType !== 4 || typeof doc._rev !== "string" || doc._id !== `${uid}#${String(doc.uniqueId)}`)
         throw new OnyxError("error", "refused: only book documents with a revision are written")
-      const response = await gateway(encodeURIComponent(doc._id), {
+      const response = await gateway(at, encodeURIComponent(doc._id), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(doc),
       })
-      const body = (await ok(response)) as { rev?: unknown }
+      const body = (await ok(response, at)) as { rev?: unknown }
       return typeof body?.rev === "string" ? body.rev : ""
     },
   }
+}
+
+// ---------------------------------------------------------------------------
+// Connecting a BOOX from the TUI
+
+export const defaultSettingsFile = (dataDir = defaultDataDir()) => join(dataDir, "settings.json")
+
+/** The plugin's saved settings (the region chosen when connecting); empty when missing or unreadable. */
+export function readSettings(file: string): { server?: OnyxServer } {
+  try {
+    const value = JSON.parse(readPrivateFile(file) ?? "{}") as { server?: unknown }
+    return value?.server === "eur" || value?.server === "us" ? { server: value.server } : {}
+  } catch {
+    return {}
+  }
+}
+
+/** The region: the `server` option when set, else the saved one (eur when neither). */
+export const onyxServer = (option: unknown, settingsFile: string): unknown => option ?? readSettings(settingsFile).server
+
+/** A token or settings file we may replace: missing, or a plain file (never a symbolic link). */
+function replaceable(file: string): boolean {
+  try {
+    return lstatSync(file).isFile()
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+  }
+}
+
+/** The content of a replaceable file, undefined when it is missing. */
+function previous(file: string): string | undefined {
+  try {
+    return readFileSync(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+}
+
+/**
+ * Checks `token` with the Onyx cloud of `server`, then saves the region and
+ * the token (0600, each in one step), and forgets the old session. A refused
+ * token is never written, and the errors never carry it. When a write fails,
+ * the files written are put back as they were (removed when they were
+ * missing) and the session is kept: the previous connection still works.
+ */
+export async function connectOnyx(
+  onyx: Onyx,
+  input: { token: unknown; server: unknown },
+  files: { tokenFile: string; settingsFile: string },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const token = cleanToken(input.token)
+  const server = input.server === "eur" || input.server === "us" ? input.server : undefined
+  if (!token) return { ok: false, error: "no token" }
+  if (!server) return { ok: false, error: "unknown region" }
+  const refused = () => [files.tokenFile, files.settingsFile].find((file) => !replaceable(file))
+  const refusal = (file: string) => ({ ok: false as const, error: `refused: ${basename(file)} is a symbolic link or not a file` })
+  const before = refused()
+  if (before) return refusal(before)
+  try {
+    await onyx.verify(token, server)
+  } catch (error) {
+    // Messages of the client's errors never carry the token.
+    if (error instanceof OnyxError && error.state === "offline") return { ok: false, error: "offline: the Onyx cloud is unreachable" }
+    if (error instanceof OnyxError && error.state === "error") return { ok: false, error: error.message }
+    return { ok: false, error: "the Onyx cloud refused this token" }
+  }
+  const after = refused()
+  if (after) return refusal(after)
+  // The settings first, then the token: the token decides whether the cloud is used.
+  const writes = [
+    { file: files.settingsFile, content: JSON.stringify({ ...readSettings(files.settingsFile), server }) },
+    { file: files.tokenFile, content: `${token}\n` },
+  ]
+  const tried: Array<{ file: string; old: string | undefined }> = []
+  try {
+    const olds = writes.map(({ file }) => previous(file))
+    writes.forEach(({ file, content }, i) => {
+      tried.push({ file, old: olds[i] })
+      writePrivateFile(file, content)
+    })
+  } catch (error) {
+    for (const { file, old } of tried.reverse()) {
+      try {
+        if (old === undefined) rmSync(file, { force: true })
+        else writePrivateFile(file, old)
+      } catch {
+        // A failed write leaves the old content (it is written in one step).
+      }
+    }
+    return { ok: false, error: `cannot save the token (${(error as NodeJS.ErrnoException).code ?? "error"})` }
+  }
+  onyx.reset()
+  return { ok: true }
+}
+
+/** Deletes the token and the sync session; backups, sync records, settings and books stay. */
+export function disconnectOnyx(onyx: Onyx, files: { tokenFile: string }): { ok: true } | { ok: false; error: string } {
+  try {
+    rmSync(files.tokenFile, { force: true })
+  } catch (error) {
+    return { ok: false, error: `cannot delete the token (${(error as NodeJS.ErrnoException).code ?? "error"})` }
+  } finally {
+    onyx.reset()
+  }
+  return { ok: true }
 }
