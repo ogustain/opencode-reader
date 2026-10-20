@@ -24,11 +24,26 @@ position to the character.
 ## Install
 
 ```sh
-opencode plugin add github:ogustain/opencode-reader
+git clone https://github.com/ogustain/opencode-reader.git
+opencode-reader/scripts/install.sh
 ```
 
-This installs the package and adds it to your global OpenCode config. To set
-options, write the entry as an object in `opencode.json(c)`:
+The script copies the `main` branch into the `plugins/` folder of your OpenCode
+config folder (`$OPENCODE_CONFIG_DIR`, else `~/.config/opencode`). OpenCode
+loads every package there on its own, so no config file is edited, and tools
+that generate the config file leave the reader alone. Restart OpenCode after
+it (`opencode service restart`).
+
+- `--ref <branch|tag>`: copy another branch or a tag. Run the script again to
+  update.
+- `--link`: link your checkout instead of copying it, to develop the reader.
+- `--target <dir>`: install into another config folder; repeat it for several,
+  for example `--target ~/.config/opencode --target ~/.superset/hooks/opencode`.
+- `--uninstall`: remove the reader from the targets.
+
+A plugin installed this way runs with the default options. To set options,
+skip the script and declare the reader in `opencode.json(c)` instead (not
+both, or it loads twice):
 
 ```jsonc
 {
@@ -42,8 +57,8 @@ options, write the entry as an object in `opencode.json(c)`:
 }
 ```
 
-The panel and commands (the `./tui` export) load automatically beside the
-server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
+Either way, the panel and commands (the `./tui` export) load automatically
+beside the server half. See [Configure plugins](https://opencode.ai/v2/docs/plugins).
 
 ## Options
 
